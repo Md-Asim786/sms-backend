@@ -436,6 +436,18 @@ def reject_student_application(app_id: uuid.UUID, db: Session = Depends(get_db))
     return {"message": "Application rejected."}
 
 
+@router.delete("/student-applications/{app_id}")
+def delete_student_application(app_id: uuid.UUID, db: Session = Depends(get_db)):
+    application = (
+        db.query(StudentApplication).filter(StudentApplication.id == app_id).first()
+    )
+    if not application:
+        raise HTTPException(status_code=404, detail="Application not found")
+    db.delete(application)
+    db.commit()
+    return {"message": "Student application deleted successfully."}
+
+
 @router.post("/student-applications/{app_id}/enroll")
 def enroll_student(
     app_id: uuid.UUID,
@@ -617,6 +629,18 @@ def reject_employee_application(app_id: uuid.UUID, db: Session = Depends(get_db)
     return {"message": "Application rejected."}
 
 
+@router.delete("/employee-applications/{app_id}")
+def delete_employee_application(app_id: uuid.UUID, db: Session = Depends(get_db)):
+    application = (
+        db.query(EmployeeApplication).filter(EmployeeApplication.id == app_id).first()
+    )
+    if not application:
+        raise HTTPException(status_code=404, detail="Application not found")
+    db.delete(application)
+    db.commit()
+    return {"message": "Employee application deleted successfully."}
+
+
 @router.post("/employee-applications/{app_id}/hire")
 def hire_employee(
     app_id: uuid.UUID,
@@ -642,15 +666,17 @@ def hire_employee(
     lms_password_plain = f"{settings.SCHOOL_NAME_ABBR}@{emp_id}"
     employee_email = application.email
 
-    # 1. Create User Account
-    user = User(
-        email=employee_email,
-        password_hash=security.get_password_hash(lms_password_plain),
-        role=UserRole(system_role),
-        is_active=True,
-    )
-    db.add(user)
-    db.flush()
+    # 1. Create User Account (Only for teachers)
+    user = None
+    if system_role == "teacher":
+        user = User(
+            email=employee_email,
+            password_hash=security.get_password_hash(lms_password_plain),
+            role=UserRole(system_role),
+            is_active=True,
+        )
+        db.add(user)
+        db.flush()
 
     new_employee = EnrolledEmployee(
         employee_id=emp_id,
@@ -673,7 +699,7 @@ def hire_employee(
         lms_email=employee_email,
         lms_login=lms_login,
         lms_password=lms_password_plain,
-        user_id=user.id,
+        user_id=user.id if user else None,
         is_active=True,
     )
     application.status = EmployeeApplicationStatus.hired
@@ -682,8 +708,8 @@ def hire_employee(
     return {
         "message": "Employee hired and enrolled successfully",
         "employee_id": emp_id,
-        "lms_login": lms_login,
-        "lms_password_plain": lms_password_plain,
+        "lms_login": lms_login if system_role == "teacher" else None,
+        "lms_password_plain": lms_password_plain if system_role == "teacher" else None,
     }
 
 
@@ -724,15 +750,17 @@ def enroll_employee_manual(
     with open(photo_path, "wb") as buffer:
         shutil.copyfileobj(photo.file, buffer)
 
-    # 1. Create User Account
-    user = User(
-        email=employee_email,
-        password_hash=security.get_password_hash(lms_password_plain),
-        role=UserRole(system_role),
-        is_active=True,
-    )
-    db.add(user)
-    db.flush()
+    # 1. Create User Account (Only for teachers)
+    user = None
+    if system_role == "teacher":
+        user = User(
+            email=employee_email,
+            password_hash=security.get_password_hash(lms_password_plain),
+            role=UserRole(system_role),
+            is_active=True,
+        )
+        db.add(user)
+        db.flush()
 
     new_employee = EnrolledEmployee(
         employee_id=emp_id,
@@ -755,7 +783,7 @@ def enroll_employee_manual(
         lms_email=employee_email,
         lms_login=lms_login,
         lms_password=lms_password_plain,
-        user_id=user.id,
+        user_id=user.id if user else None,
         is_active=True,
     )
     db.add(new_employee)
@@ -1095,15 +1123,18 @@ async def bulk_enroll(
             lms_login = emp_id
             lms_password_plain = f"{settings.SCHOOL_NAME_ABBR}@{emp_id}"
 
-            # Create User
-            user = User(
-                email=row["email"],
-                password_hash=security.get_password_hash(lms_password_plain),
-                role=UserRole(row.get("system_role", role)),
-                is_active=True,
-            )
-            db.add(user)
-            db.flush()
+            # Create User (Only for teachers)
+            system_role_val = str(row.get("system_role", role)).lower()
+            user = None
+            if system_role_val == "teacher":
+                user = User(
+                    email=row["email"],
+                    password_hash=security.get_password_hash(lms_password_plain),
+                    role=UserRole.teacher,
+                    is_active=True,
+                )
+                db.add(user)
+                db.flush()
 
             employee = EnrolledEmployee(
                 employee_id=emp_id,
@@ -1122,7 +1153,7 @@ async def bulk_enroll(
                 lms_email=row["email"],
                 lms_login=emp_id,
                 lms_password=lms_password_plain,
-                user_id=user.id,
+                user_id=user.id if user else None,
                 is_active=True,
                 photo_url=row.get("photo_url"),  # Handle picture from excel
             )
