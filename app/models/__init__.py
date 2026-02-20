@@ -3,10 +3,16 @@ from app.models.auth import User
 from app.models.applications import StudentApplication, EmployeeApplication
 from app.models.users import EnrolledStudent, EnrolledEmployee
 from app.models.lms import (
+    AcademicYear,
+    AcademicGroup,
     Class,
     Section,
     Subject,
     ClassSubject,
+    GroupSubject,
+    StudentSubject,
+    StudentGroupEnrollment,
+    TeacherSubject,
     Assignment,
     Lecture,
     AttendanceRecord,

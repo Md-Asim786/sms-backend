@@ -48,6 +48,9 @@ class EnrolledStudent(Base):
 
     class_id = Column(UUID(as_uuid=True), ForeignKey("classes.id"), nullable=False)
     section_id = Column(UUID(as_uuid=True), ForeignKey("sections.id"), nullable=False)
+    group_id = Column(
+        UUID(as_uuid=True), ForeignKey("academic_groups.id"), nullable=True
+    )  # For classes 9-12
     applying_for_class = Column(String)
     city = Column(String)
     address = Column(Text)
@@ -61,6 +64,7 @@ class EnrolledStudent(Base):
 
     class_ = relationship("app.models.lms.Class")
     section = relationship("app.models.lms.Section")
+    group = relationship("app.models.lms.AcademicGroup")
     user = relationship("app.models.auth.User")
 
     enrolled_at = Column(DateTime(timezone=True), server_default=func.now())

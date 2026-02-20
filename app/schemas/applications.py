@@ -17,6 +17,7 @@ class StudentApplicationBase(BaseModel):
     city: str
     address: str
     applying_for_class: str
+    group_id: Optional[UUID] = None
     previous_school: Optional[str] = None
 
 

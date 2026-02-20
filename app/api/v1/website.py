@@ -15,6 +15,7 @@ from app.models import (
     StudentApplication,
     EmployeeApplication,
     SchoolConfig,
+    Subject,
 )
 from app.models.applications import StudentApplicationStatus, EmployeeApplicationStatus
 from app.schemas import (
@@ -26,6 +27,7 @@ from app.schemas import (
     EmployeeApplicationResponse,
     SchoolConfigResponse,
 )
+from app.schemas.lms import SubjectResponse
 from app.core.config import settings
 
 from app.models.lms import Class
@@ -53,6 +55,11 @@ def get_job_categories(db: Session = Depends(get_db)):
 @router.get("/leadership", response_model=List[LeadershipMemberResponse])
 def get_leadership(db: Session = Depends(get_db)):
     return db.query(LeadershipMember).order_by(LeadershipMember.display_order).all()
+
+
+@router.get("/subjects", response_model=List[SubjectResponse])
+def get_subjects(db: Session = Depends(get_db)):
+    return db.query(Subject).all()
 
 
 @router.get("/config", response_model=SchoolConfigResponse)
@@ -95,6 +102,7 @@ async def apply_student(
     city: str = Form(...),
     address: str = Form(...),
     applying_for_class: str = Form(...),
+    group_id: Optional[str] = Form(None),
     previous_school: Optional[str] = Form(None),
     photo: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -156,6 +164,7 @@ async def apply_student(
         city=city,
         address=address,
         applying_for_class=applying_for_class,
+        group_id=uuid.UUID(group_id) if group_id else None,
         previous_school=previous_school,
         status=StudentApplicationStatus.applied,
     )
@@ -176,6 +185,7 @@ async def apply_employee(
     cnic: str = Form(...),
     position_applied_for: str = Form(...),
     subject: Optional[str] = Form(None),
+    subjects: Optional[str] = Form(None),  # Comma-separated subject IDs
     highest_qualification: str = Form(...),
     experience_years: str = Form(...),
     current_organization: Optional[str] = Form(None),
@@ -216,6 +226,7 @@ async def apply_employee(
         cnic=cnic,
         position_applied_for=position_applied_for,
         subject=subject,
+        subjects=subjects,  # Store subject IDs
         highest_qualification=highest_qualification,
         experience_years=experience_years,
         current_organization=current_organization,

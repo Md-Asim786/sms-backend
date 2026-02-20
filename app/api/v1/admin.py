@@ -73,20 +73,113 @@ from app.schemas.lms import (
     BulkSectionCreate,
     BulkMappingCreate,
     BulkClassCreate,
+    AcademicYearCreate,
+    AcademicYearResponse,
+    StudentSubjectResponse,
+    TeacherSubjectCreate,
+    TeacherSubjectResponse,
+    AcademicGroupCreate,
+    AcademicGroupResponse,
+    GroupSubjectCreate,
+    GroupSubjectResponse,
+    BulkGroupSubjectCreate,
+    StudentGroupEnrollmentCreate,
+    StudentGroupEnrollmentResponse,
+    StudentSubjectResponseExtended,
 )
 from app.schemas.dashboard import (
     DashboardOverviewResponse,
     DashboardStatsResponse,
     ActivityItem,
 )
-from app.models.lms import Class, Section, Subject, ClassSubject, AttendanceRecord
+from app.models.lms import (
+    Class,
+    Section,
+    Subject,
+    ClassSubject,
+    AttendanceRecord,
+    AcademicYear,
+    AcademicGroup,
+    GroupSubject,
+    StudentSubject,
+    StudentGroupEnrollment,
+    TeacherSubject,
+    SubjectSourceType,
+    ClassGroup,
+    PromotionHistory,
+)
+from app.models.exams import Result
+from app.schemas.dashboard import (
+    DashboardOverviewResponse,
+    DashboardStatsResponse,
+    ActivityItem,
+)
+from app.models.lms import (
+    Class,
+    Section,
+    Subject,
+    ClassSubject,
+    AttendanceRecord,
+    AcademicYear,
+    AcademicGroup,
+    GroupSubject,
+    StudentSubject,
+    TeacherSubject,
+    ClassGroup,
+    PromotionHistory,
+)
+from app.schemas.lms import (
+    PromotionHistoryCreate,
+    PromotionHistoryResponse,
+    StudentExamStatus,
+    PromoteStudentsRequest,
+)
 
 router = APIRouter()
 
 
+def auto_enroll_student_subjects(
+    db: Session,
+    student_id: uuid.UUID,
+    class_id: uuid.UUID,
+    academic_year_id: Optional[uuid.UUID] = None,
+):
+    """Auto-assign all subjects from class to student"""
+    class_subjects = (
+        db.query(ClassSubject).filter(ClassSubject.class_id == class_id).all()
+    )
+
+    for cs in class_subjects:
+        existing = (
+            db.query(StudentSubject)
+            .filter(
+                StudentSubject.student_id == student_id,
+                StudentSubject.class_subject_id == cs.id,
+            )
+            .first()
+        )
+
+        if not existing:
+            student_subject = StudentSubject(
+                student_id=student_id,
+                class_id=class_id,
+                subject_id=cs.subject_id,
+                class_subject_id=cs.id,
+                academic_year_id=academic_year_id,
+            )
+            db.add(student_subject)
+
+    db.commit()
+
+
+def get_current_academic_year(db: Session):
+    """Get current academic year"""
+    return db.query(AcademicYear).filter(AcademicYear.is_current == True).first()
+
+
 @router.get("/dashboard/overview", response_model=DashboardOverviewResponse)
 def get_dashboard_overview(db: Session = Depends(get_db)):
-    # 1. Stats
+    # 1. Stats - All applications (not just pending)
     student_applications = db.query(StudentApplication).count()
     total_students_enrolled = db.query(EnrolledStudent).count()
     employee_applications = db.query(EmployeeApplication).count()
@@ -188,15 +281,46 @@ def get_dashboard_overview(db: Session = Depends(get_db)):
 
 
 # Classes
-@router.get("/lms/classes", response_model=List[ClassResponse])
+@router.get("/lms/classes")
 def get_classes(db: Session = Depends(get_db)):
-    return db.query(Class).all()
+    classes = db.query(Class).all()
+    result = []
+    for cls in classes:
+        class_dict = {
+            "id": str(cls.id),
+            "name": cls.name,
+            "code": cls.code,
+            "grade_level": cls.grade_level,
+            "academic_year_id": str(cls.academic_year_id)
+            if cls.academic_year_id
+            else None,
+            "academic_groups": [
+                {"id": str(g.id), "name": g.name, "code": g.code}
+                for g in cls.academic_groups
+            ]
+            if hasattr(cls, "academic_groups")
+            else [],
+        }
+        result.append(class_dict)
+    return result
 
 
 @router.post("/lms/classes", response_model=ClassResponse)
 def create_class(class_in: ClassCreate, db: Session = Depends(get_db)):
-    cls = Class(**class_in.model_dump())
+    class_data = class_in.model_dump()
+    group_ids = class_data.pop("group_ids", None)
+
+    cls = Class(**class_data)
     db.add(cls)
+    db.flush()
+
+    if group_ids:
+        for group_id in group_ids:
+            group = db.query(AcademicGroup).filter(AcademicGroup.id == group_id).first()
+            if group:
+                association = ClassGroup(class_id=cls.id, group_id=group_id)
+                db.add(association)
+
     db.commit()
     db.refresh(cls)
     return cls
@@ -209,9 +333,21 @@ def update_class(
     cls = db.query(Class).filter(Class.id == class_id).first()
     if not cls:
         raise HTTPException(status_code=404, detail="Class not found")
+
     update_data = class_in.model_dump(exclude_unset=True)
+    group_ids = update_data.pop("group_ids", None)
+
     for field, value in update_data.items():
         setattr(cls, field, value)
+
+    if group_ids is not None:
+        db.query(ClassGroup).filter(ClassGroup.class_id == class_id).delete()
+        for group_id in group_ids:
+            group = db.query(AcademicGroup).filter(AcademicGroup.id == group_id).first()
+            if group:
+                association = ClassGroup(class_id=cls.id, group_id=group_id)
+                db.add(association)
+
     db.commit()
     db.refresh(cls)
     return cls
@@ -222,6 +358,17 @@ def delete_class(class_id: uuid.UUID, db: Session = Depends(get_db)):
     cls = db.query(Class).filter(Class.id == class_id).first()
     if not cls:
         raise HTTPException(status_code=404, detail="Class not found")
+
+    # Check if students are enrolled in this class
+    enrolled_count = (
+        db.query(EnrolledStudent).filter(EnrolledStudent.class_id == class_id).count()
+    )
+    if enrolled_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete class because it has {enrolled_count} enrolled students. Please move or unenroll them first.",
+        )
+
     db.delete(cls)
     db.commit()
     return {"message": "Class deleted successfully"}
@@ -253,6 +400,19 @@ def get_all_sections(db: Session = Depends(get_db)):
 
 @router.post("/lms/sections", response_model=SectionResponse)
 def create_section(section_in: SectionCreate, db: Session = Depends(get_db)):
+    # Check if section name already exists in this class
+    exists = (
+        db.query(Section)
+        .filter(
+            Section.class_id == section_in.class_id, Section.name == section_in.name
+        )
+        .first()
+    )
+    if exists:
+        raise HTTPException(
+            status_code=400, detail="Section name already exists for this class"
+        )
+
     sec = Section(**section_in.model_dump())
     db.add(sec)
     db.commit()
@@ -296,6 +456,64 @@ def get_sections(class_id: uuid.UUID, db: Session = Depends(get_db)):
     return db.query(Section).filter(Section.class_id == class_id).all()
 
 
+@router.patch("/lms/sections/{section_id}", response_model=SectionResponse)
+def update_section(
+    section_id: uuid.UUID, data: dict = Body(...), db: Session = Depends(get_db)
+):
+    section = db.query(Section).filter(Section.id == section_id).first()
+    if not section:
+        raise HTTPException(status_code=404, detail="Section not found")
+
+    if "name" in data:
+        # Check for duplicate name in same class
+        existing = (
+            db.query(Section)
+            .filter(
+                Section.class_id == section.class_id,
+                Section.name == data["name"],
+                Section.id != section_id,
+            )
+            .first()
+        )
+        if existing:
+            raise HTTPException(
+                status_code=400,
+                detail="Section with this name already exists in this class",
+            )
+        section.name = data["name"]
+    if "capacity" in data:
+        section.capacity = data["capacity"]
+
+    db.commit()
+    db.refresh(section)
+    return section
+
+
+@router.delete("/lms/sections/{section_id}")
+def delete_section(section_id: uuid.UUID, db: Session = Depends(get_db)):
+    section = db.query(Section).filter(Section.id == section_id).first()
+    if not section:
+        raise HTTPException(status_code=404, detail="Section not found")
+
+    # Check if section has students
+    from app.models.users import EnrolledStudent
+
+    student_count = (
+        db.query(EnrolledStudent)
+        .filter(EnrolledStudent.section_id == section_id)
+        .count()
+    )
+    if student_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete section with {student_count} enrolled students",
+        )
+
+    db.delete(section)
+    db.commit()
+    return {"message": "Section deleted"}
+
+
 # Subjects
 @router.get("/lms/subjects", response_model=List[SubjectResponse])
 def get_subjects(db: Session = Depends(get_db)):
@@ -304,11 +522,72 @@ def get_subjects(db: Session = Depends(get_db)):
 
 @router.post("/lms/subjects", response_model=SubjectResponse)
 def create_subject(subject_in: SubjectCreate, db: Session = Depends(get_db)):
+    # Check if subject code already exists
+    exists = db.query(Subject).filter(Subject.code == subject_in.code).first()
+    if exists:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Subject with code '{subject_in.code}' already exists",
+        )
+
     sub = Subject(**subject_in.model_dump())
     db.add(sub)
     db.commit()
     db.refresh(sub)
     return sub
+
+
+@router.patch("/lms/subjects/{subject_id}", response_model=SubjectResponse)
+def update_subject(
+    subject_id: uuid.UUID, data: dict = Body(...), db: Session = Depends(get_db)
+):
+    subject = db.query(Subject).filter(Subject.id == subject_id).first()
+    if not subject:
+        raise HTTPException(status_code=404, detail="Subject not found")
+
+    if "name" in data:
+        subject.name = data["name"]
+    if "code" in data:
+        # Check if new code already exists for another subject
+        exists = (
+            db.query(Subject)
+            .filter(Subject.code == data["code"], Subject.id != subject_id)
+            .first()
+        )
+        if exists:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Subject with code '{data['code']}' already exists",
+            )
+        subject.code = data["code"]
+    if "description" in data:
+        subject.description = data["description"]
+    if "type" in data:
+        subject.type = data["type"]
+
+    db.commit()
+    db.refresh(subject)
+    return subject
+
+
+@router.delete("/lms/subjects/{subject_id}")
+def delete_subject(subject_id: uuid.UUID, db: Session = Depends(get_db)):
+    subject = db.query(Subject).filter(Subject.id == subject_id).first()
+    if not subject:
+        raise HTTPException(status_code=404, detail="Subject not found")
+
+    # Check if subject is in use
+    class_subjects = (
+        db.query(ClassSubject).filter(ClassSubject.subject_id == subject_id).first()
+    )
+    if class_subjects:
+        raise HTTPException(
+            status_code=400, detail="Cannot delete subject that is assigned to classes"
+        )
+
+    db.delete(subject)
+    db.commit()
+    return {"message": "Subject deleted"}
 
 
 # Class Subjects (Mapping)
@@ -338,14 +617,13 @@ def assign_subjects_to_class_bulk(
             .first()
         )
         if existing_mapping:
-            if mapping_data.teacher_id:
-                existing_mapping.teacher_id = mapping_data.teacher_id
-                mappings.append(existing_mapping)
+            mappings.append(existing_mapping)
         else:
+            current_year = get_current_academic_year(db)
             new_mapping = ClassSubject(
                 class_id=bulk_in.class_id,
                 subject_id=mapping_data.subject_id,
-                teacher_id=mapping_data.teacher_id,
+                academic_year_id=current_year.id if current_year else None,
             )
             db.add(new_mapping)
             mappings.append(new_mapping)
@@ -372,8 +650,8 @@ def update_class_subject(
     if not mapping:
         raise HTTPException(status_code=404, detail="Mapping not found")
 
-    if "teacher_id" in data:
-        mapping.teacher_id = data["teacher_id"]
+    if "periods_per_week" in data:
+        mapping.periods_per_week = data["periods_per_week"]
 
     db.commit()
     db.refresh(mapping)
@@ -565,6 +843,12 @@ def enroll_student(
     application.status = StudentApplicationStatus.accepted
     db.add(new_student)
     db.commit()
+    db.refresh(new_student)
+
+    current_year = get_current_academic_year(db)
+    auto_enroll_student_subjects(
+        db, new_student.id, target_class.id, current_year.id if current_year else None
+    )
 
     return {
         "message": "Student enrolled successfully",
@@ -581,7 +865,11 @@ def enroll_student(
 
 @router.get("/employee-applications")
 def get_employee_applications(db: Session = Depends(get_db)):
-    return db.query(EmployeeApplication).all()
+    return (
+        db.query(EmployeeApplication)
+        .filter(EmployeeApplication.status == EmployeeApplicationStatus.applied)
+        .all()
+    )
 
 
 @router.post("/employee-applications/{app_id}/interview")
@@ -705,6 +993,10 @@ def hire_employee(
     application.status = EmployeeApplicationStatus.hired
     db.add(new_employee)
     db.commit()
+
+    db.delete(application)
+    db.commit()
+
     return {
         "message": "Employee hired and enrolled successfully",
         "employee_id": emp_id,
@@ -899,18 +1191,83 @@ def enroll_student_manual(
     db.add(new_student)
     db.commit()
     db.refresh(new_student)
+
+    current_year = get_current_academic_year(db)
+    auto_enroll_student_subjects(
+        db, new_student.id, target_class.id, current_year.id if current_year else None
+    )
+
     return new_student
 
 
 # --- Enrolled Student Management ---
 
 
-@router.get("/enrolled-students", response_model=List[EnrolledStudentResponse])
+@router.get("/enrolled-students", response_model=List[dict])
 def get_enrolled_students(db: Session = Depends(get_db)):
-    return db.query(EnrolledStudent).all()
+    students = db.query(EnrolledStudent).all()
+
+    result = []
+    for student in students:
+        student_dict = {
+            "id": student.id,
+            "reg_id": student.reg_id,
+            "system_student_id": student.system_student_id,
+            "admission_number": student.admission_number,
+            "first_name": student.first_name,
+            "last_name": student.last_name,
+            "gender": student.gender,
+            "date_of_birth": student.date_of_birth,
+            "student_photo_url": student.student_photo_url,
+            "b_form_number": student.b_form_number,
+            "student_cnic": student.student_cnic,
+            "guardian_name": student.guardian_name,
+            "guardian_cnic": student.guardian_cnic,
+            "guardian_phone": student.guardian_phone,
+            "guardian_email": student.guardian_email,
+            "class_id": student.class_id,
+            "section_id": student.section_id,
+            "group_id": student.group_id,
+            "city": student.city,
+            "address": student.address,
+            "user_id": student.user_id,
+            "lms_email": student.lms_email,
+            "lms_login": student.lms_login,
+            "lms_password": student.lms_password,
+            "enrolled_at": student.enrolled_at,
+            "is_active": student.is_active,
+        }
+
+        # Get class name
+        if student.class_id:
+            class_obj = db.query(Class).filter(Class.id == student.class_id).first()
+            if class_obj:
+                student_dict["class_name"] = class_obj.name
+
+        # Get section name
+        if student.section_id:
+            section_obj = (
+                db.query(Section).filter(Section.id == student.section_id).first()
+            )
+            if section_obj:
+                student_dict["section_name"] = section_obj.name
+
+        # Get group name
+        if student.group_id:
+            group_obj = (
+                db.query(AcademicGroup)
+                .filter(AcademicGroup.id == student.group_id)
+                .first()
+            )
+            if group_obj:
+                student_dict["group_name"] = group_obj.name
+
+        result.append(student_dict)
+
+    return result
 
 
-@router.patch("/enrolled-students/{student_id}", response_model=EnrolledStudentResponse)
+@router.patch("/enrolled-students/{student_id}")
 def update_enrolled_student(
     student_id: uuid.UUID,
     student_data: EnrolledStudentUpdate,
@@ -921,6 +1278,64 @@ def update_enrolled_student(
         raise HTTPException(status_code=404, detail="Student not found")
 
     update_dict = student_data.model_dump(exclude_unset=True)
+
+    # Handle class/section change - remove null values to preserve existing
+    if "class_id" in update_dict and not update_dict["class_id"]:
+        del update_dict["class_id"]
+    if "section_id" in update_dict and not update_dict["section_id"]:
+        del update_dict["section_id"]
+
+    new_class_id = update_dict.get("class_id")
+    new_section_id = update_dict.get("section_id")
+
+    if new_class_id:
+        target_class_id = new_class_id
+        target_class = db.query(Class).filter(Class.id == target_class_id).first()
+
+        if not target_class:
+            raise HTTPException(status_code=404, detail="Target class not found")
+
+        # If class changed and no section specified, auto-assign
+        if student.class_id != new_class_id and not new_section_id:
+            available_section = None
+            if target_class.sections:
+                for section in target_class.sections:
+                    current_count = (
+                        db.query(EnrolledStudent)
+                        .filter(EnrolledStudent.section_id == section.id)
+                        .count()
+                    )
+                    if current_count < (section.capacity or 30):
+                        available_section = section
+                        break
+
+                if available_section:
+                    update_dict["section_id"] = available_section.id
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"All sections for {target_class.name} are at full capacity",
+                    )
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No sections found for {target_class.name}. Please create sections first.",
+                )
+        elif new_section_id:
+            # Check capacity for specified section
+            section = db.query(Section).filter(Section.id == new_section_id).first()
+            if section:
+                current_count = (
+                    db.query(EnrolledStudent)
+                    .filter(EnrolledStudent.section_id == new_section_id)
+                    .filter(EnrolledStudent.id != student.id)
+                    .count()
+                )
+                if current_count >= (section.capacity or 30):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Section {section.name} is at full capacity",
+                    )
 
     # Handle User account updates if credentials changed
     if "lms_password" in update_dict or "lms_email" in update_dict:
@@ -939,7 +1354,55 @@ def update_enrolled_student(
 
     db.commit()
     db.refresh(student)
-    return student
+
+    # Return updated student with class/section names
+    result = {
+        "id": student.id,
+        "reg_id": student.reg_id,
+        "system_student_id": student.system_student_id,
+        "admission_number": student.admission_number,
+        "first_name": student.first_name,
+        "last_name": student.last_name,
+        "gender": student.gender,
+        "date_of_birth": student.date_of_birth,
+        "student_photo_url": student.student_photo_url,
+        "b_form_number": student.b_form_number,
+        "student_cnic": student.student_cnic,
+        "guardian_name": student.guardian_name,
+        "guardian_cnic": student.guardian_cnic,
+        "guardian_phone": student.guardian_phone,
+        "guardian_email": student.guardian_email,
+        "class_id": student.class_id,
+        "section_id": student.section_id,
+        "group_id": student.group_id,
+        "city": student.city,
+        "address": student.address,
+        "user_id": student.user_id,
+        "lms_email": student.lms_email,
+        "lms_login": student.lms_login,
+        "lms_password": student.lms_password,
+        "enrolled_at": student.enrolled_at,
+        "is_active": student.is_active,
+    }
+
+    if student.class_id:
+        class_obj = db.query(Class).filter(Class.id == student.class_id).first()
+        if class_obj:
+            result["class_name"] = class_obj.name
+
+    if student.section_id:
+        section_obj = db.query(Section).filter(Section.id == student.section_id).first()
+        if section_obj:
+            result["section_name"] = section_obj.name
+
+    if student.group_id:
+        group_obj = (
+            db.query(AcademicGroup).filter(AcademicGroup.id == student.group_id).first()
+        )
+        if group_obj:
+            result["group_name"] = group_obj.name
+
+    return result
 
 
 @router.delete("/enrolled-students/{student_id}")
@@ -1108,9 +1571,18 @@ async def bulk_enroll(
                 lms_password=lms_password_plain,
                 user_id=user.id,
                 is_active=True,
-                student_photo_url=row.get("photo_url"),  # Handle picture from excel
+                student_photo_url=row.get("photo_url"),
             )
             db.add(student)
+            db.flush()
+
+            current_year = get_current_academic_year(db)
+            auto_enroll_student_subjects(
+                db,
+                student.id,
+                target_class.id,
+                current_year.id if current_year else None,
+            )
     elif role in ["teacher", "staff"]:
         count = (
             db.query(EnrolledEmployee)
@@ -1496,3 +1968,834 @@ def update_news(
         news.image_url = f"/uploads/photos/{photo_filename}"
     db.commit()
     return news
+
+
+# --- Academic Year Management ---
+
+
+@router.get("/lms/academic-years", response_model=List[AcademicYearResponse])
+def get_academic_years(db: Session = Depends(get_db)):
+    return db.query(AcademicYear).order_by(AcademicYear.start_year.desc()).all()
+
+
+@router.post("/lms/academic-years", response_model=AcademicYearResponse)
+def create_academic_year(year_in: AcademicYearCreate, db: Session = Depends(get_db)):
+    if year_in.is_current:
+        db.query(AcademicYear).update({AcademicYear.is_current: False})
+    year = AcademicYear(**year_in.model_dump())
+    db.add(year)
+    db.commit()
+    db.refresh(year)
+    return year
+
+
+@router.patch("/lms/academic-years/{year_id}/set-current")
+def set_current_academic_year(year_id: uuid.UUID, db: Session = Depends(get_db)):
+    year = db.query(AcademicYear).filter(AcademicYear.id == year_id).first()
+    if not year:
+        raise HTTPException(status_code=404, detail="Academic year not found")
+    db.query(AcademicYear).update({AcademicYear.is_current: False})
+    year.is_current = True
+    db.commit()
+    return {"message": f"Academic year {year.name} set as current"}
+
+
+# --- Teacher Subject Assignment ---
+
+
+@router.get("/lms/teachers", response_model=List[EnrolledEmployeeResponse])
+def get_teachers(specialization: Optional[str] = None, db: Session = Depends(get_db)):
+    query = db.query(EnrolledEmployee).filter(EnrolledEmployee.system_role == "teacher")
+    if specialization:
+        query = query.filter(EnrolledEmployee.subject.ilike(f"%{specialization}%"))
+    return query.all()
+
+
+@router.post("/lms/teacher-subjects", response_model=TeacherSubjectResponse)
+def assign_teacher_to_subject(
+    assignment_in: TeacherSubjectCreate, db: Session = Depends(get_db)
+):
+    try:
+        # Check if teacher exists
+        teacher = (
+            db.query(EnrolledEmployee)
+            .filter(EnrolledEmployee.id == assignment_in.teacher_id)
+            .first()
+        )
+        if not teacher:
+            raise HTTPException(status_code=404, detail="Teacher not found")
+
+        # Check if class_subject exists
+        class_subject = (
+            db.query(ClassSubject)
+            .filter(ClassSubject.id == assignment_in.class_subject_id)
+            .first()
+        )
+        if not class_subject:
+            raise HTTPException(
+                status_code=404, detail="Class subject mapping not found"
+            )
+
+        existing = (
+            db.query(TeacherSubject)
+            .filter(
+                TeacherSubject.class_subject_id == assignment_in.class_subject_id,
+                TeacherSubject.section_id == assignment_in.section_id,
+            )
+            .first()
+        )
+
+        if existing:
+            # Update existing instead of error
+            existing.teacher_id = assignment_in.teacher_id
+            db.commit()
+            db.refresh(existing)
+            return existing
+
+        assignment = TeacherSubject(**assignment_in.model_dump())
+        db.add(assignment)
+        db.commit()
+        db.refresh(assignment)
+        return assignment
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500, detail=f"Failed to assign teacher: {str(e)}"
+        )
+
+
+@router.get(
+    "/lms/classes/{class_id}/teacher-subjects",
+    response_model=List[TeacherSubjectResponse],
+)
+def get_teacher_subjects_by_class(class_id: uuid.UUID, db: Session = Depends(get_db)):
+    return db.query(TeacherSubject).filter(TeacherSubject.class_id == class_id).all()
+
+
+@router.get(
+    "/lms/teachers/{teacher_id}/subjects", response_model=List[TeacherSubjectResponse]
+)
+def get_teacher_assigned_subjects(teacher_id: uuid.UUID, db: Session = Depends(get_db)):
+    return (
+        db.query(TeacherSubject).filter(TeacherSubject.teacher_id == teacher_id).all()
+    )
+
+
+@router.delete("/lms/teacher-subjects/{assignment_id}")
+def remove_teacher_subject(assignment_id: uuid.UUID, db: Session = Depends(get_db)):
+    assignment = (
+        db.query(TeacherSubject).filter(TeacherSubject.id == assignment_id).first()
+    )
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Teacher assignment not found")
+    db.delete(assignment)
+    db.commit()
+    return {"message": "Teacher unassigned from subject"}
+
+
+# --- Student Subject Queries ---
+
+
+@router.get(
+    "/lms/students/{student_id}/subjects",
+    response_model=List[StudentSubjectResponseExtended],
+)
+def get_student_subjects(student_id: uuid.UUID, db: Session = Depends(get_db)):
+    return (
+        db.query(StudentSubject)
+        .filter(
+            StudentSubject.student_id == student_id, StudentSubject.status == "active"
+        )
+        .all()
+    )
+
+
+@router.get(
+    "/lms/subjects/{subject_id}/students", response_model=List[StudentSubjectResponse]
+)
+def get_students_by_subject(subject_id: uuid.UUID, db: Session = Depends(get_db)):
+    return (
+        db.query(StudentSubject)
+        .filter(
+            StudentSubject.subject_id == subject_id, StudentSubject.status == "active"
+        )
+        .all()
+    )
+
+
+# --- Academic Group Management ---
+
+
+@router.get("/lms/groups", response_model=List[AcademicGroupResponse])
+def get_academic_groups(db: Session = Depends(get_db)):
+    groups = db.query(AcademicGroup).filter(AcademicGroup.is_active == True).all()
+    return groups
+
+
+@router.post("/lms/groups", response_model=AcademicGroupResponse)
+def create_academic_group(group_in: AcademicGroupCreate, db: Session = Depends(get_db)):
+    group_data = group_in.model_dump()
+    class_ids = group_data.pop("class_ids", None)
+
+    if class_ids:
+        for class_id in class_ids:
+            cls = db.query(Class).filter(Class.id == class_id).first()
+            if cls:
+                grade_level = cls.grade_level
+                if grade_level and grade_level < 9:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Groups can only be assigned to classes 9, 10, 11, and 12. Class '{cls.name}' has grade level {grade_level}.",
+                    )
+
+    group = AcademicGroup(**group_data)
+    db.add(group)
+    db.flush()
+
+    if class_ids:
+        for class_id in class_ids:
+            association = ClassGroup(class_id=class_id, group_id=group.id)
+            db.add(association)
+
+    db.commit()
+    db.refresh(group)
+    return group
+
+
+@router.patch("/lms/groups/{group_id}", response_model=AcademicGroupResponse)
+def update_academic_group(
+    group_id: uuid.UUID, data: dict = Body(...), db: Session = Depends(get_db)
+):
+    group = db.query(AcademicGroup).filter(AcademicGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    class_ids = data.pop("class_ids", None)
+
+    for key, value in data.items():
+        if hasattr(group, key):
+            setattr(group, key, value)
+
+    if class_ids is not None:
+        db.query(ClassGroup).filter(ClassGroup.group_id == group_id).delete()
+        for class_id in class_ids:
+            cls = db.query(Class).filter(Class.id == class_id).first()
+            if cls:
+                grade_level = cls.grade_level
+                if grade_level and grade_level < 9:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Groups can only be assigned to classes 9, 10, 11, and 12. Class '{cls.name}' has grade level {grade_level}.",
+                    )
+            association = ClassGroup(class_id=class_id, group_id=group_id)
+            db.add(association)
+
+    db.commit()
+    db.refresh(group)
+    return group
+
+
+@router.delete("/lms/groups/{group_id}")
+def delete_academic_group(group_id: uuid.UUID, db: Session = Depends(get_db)):
+    group = db.query(AcademicGroup).filter(AcademicGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    group.is_active = False
+    db.commit()
+    return {"message": "Group deactivated"}
+
+
+# --- Group Subject Mapping ---
+
+
+@router.get(
+    "/lms/groups/{group_id}/subjects", response_model=List[GroupSubjectResponse]
+)
+def get_group_subjects(group_id: uuid.UUID, db: Session = Depends(get_db)):
+    return db.query(GroupSubject).filter(GroupSubject.group_id == group_id).all()
+
+
+@router.post("/lms/groups/{group_id}/subjects", response_model=GroupSubjectResponse)
+def add_subject_to_group(
+    group_id: uuid.UUID, mapping_in: GroupSubjectCreate, db: Session = Depends(get_db)
+):
+    existing = (
+        db.query(GroupSubject)
+        .filter(
+            GroupSubject.group_id == group_id,
+            GroupSubject.subject_id == mapping_in.subject_id,
+        )
+        .first()
+    )
+
+    if existing:
+        raise HTTPException(status_code=400, detail="Subject already added to group")
+
+    mapping = GroupSubject(group_id=group_id, subject_id=mapping_in.subject_id)
+    db.add(mapping)
+    db.commit()
+    db.refresh(mapping)
+    return mapping
+
+
+@router.post(
+    "/lms/groups/{group_id}/subjects/bulk", response_model=List[GroupSubjectResponse]
+)
+def add_subjects_to_group_bulk(
+    group_id: uuid.UUID, bulk_in: BulkGroupSubjectCreate, db: Session = Depends(get_db)
+):
+    mappings = []
+    for item in bulk_in.subjects:
+        existing = (
+            db.query(GroupSubject)
+            .filter(
+                GroupSubject.group_id == group_id,
+                GroupSubject.subject_id == item.subject_id,
+            )
+            .first()
+        )
+
+        if not existing:
+            mapping = GroupSubject(group_id=group_id, subject_id=item.subject_id)
+            db.add(mapping)
+            mappings.append(mapping)
+
+    db.commit()
+    for m in mappings:
+        db.refresh(m)
+    return mappings
+
+
+@router.delete("/lms/group-subjects/{mapping_id}")
+def remove_subject_from_group(mapping_id: uuid.UUID, db: Session = Depends(get_db)):
+    mapping = db.query(GroupSubject).filter(GroupSubject.id == mapping_id).first()
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+
+    db.delete(mapping)
+    db.commit()
+    return {"message": "Subject removed from group"}
+
+
+# --- Student Group Enrollment ---
+
+
+@router.get(
+    "/lms/students/{student_id}/group", response_model=StudentGroupEnrollmentResponse
+)
+def get_student_group_enrollment(student_id: uuid.UUID, db: Session = Depends(get_db)):
+    enrollment = (
+        db.query(StudentGroupEnrollment)
+        .filter(StudentGroupEnrollment.student_id == student_id)
+        .first()
+    )
+
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="No group enrollment found")
+
+    return enrollment
+
+
+@router.post(
+    "/lms/students/{student_id}/group", response_model=StudentGroupEnrollmentResponse
+)
+def enroll_student_in_group(
+    student_id: uuid.UUID,
+    group_id: uuid.UUID,
+    lock_group: bool = False,
+    db: Session = Depends(get_db),
+):
+    student = db.query(EnrolledStudent).filter(EnrolledStudent.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    group = db.query(AcademicGroup).filter(AcademicGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    current_year = get_current_academic_year(db)
+
+    existing_enrollment = (
+        db.query(StudentGroupEnrollment)
+        .filter(StudentGroupEnrollment.student_id == student_id)
+        .first()
+    )
+
+    if existing_enrollment:
+        if existing_enrollment.is_locked:
+            raise HTTPException(
+                status_code=400, detail="Group is locked. Contact admin to change."
+            )
+
+        if existing_enrollment.group_id != group_id:
+            db.query(StudentSubject).filter(
+                StudentSubject.student_id == student_id,
+                StudentSubject.source_type == SubjectSourceType.group,
+            ).delete()
+
+            existing_enrollment.group_id = group_id
+            existing_enrollment.academic_year_id = (
+                current_year.id if current_year else None
+            )
+            existing_enrollment.is_locked = lock_group
+            student.group_id = group_id
+            db.commit()
+            db.refresh(existing_enrollment)
+
+            enroll_group_subjects(db, student, group, current_year)
+
+            return existing_enrollment
+
+    enrollment = StudentGroupEnrollment(
+        student_id=student_id,
+        group_id=group_id,
+        academic_year_id=current_year.id if current_year else None,
+        is_locked=lock_group,
+    )
+    db.add(enrollment)
+    student.group_id = group_id
+    db.commit()
+    db.refresh(enrollment)
+
+    enroll_group_subjects(db, student, group, current_year)
+
+    return enrollment
+
+
+@router.patch("/lms/students/{student_id}/group/lock")
+def lock_student_group(student_id: uuid.UUID, db: Session = Depends(get_db)):
+    enrollment = (
+        db.query(StudentGroupEnrollment)
+        .filter(StudentGroupEnrollment.student_id == student_id)
+        .first()
+    )
+
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="No group enrollment found")
+
+    enrollment.is_locked = True
+    db.commit()
+    return {"message": "Group locked"}
+
+
+@router.patch("/lms/students/{student_id}/group/unlock")
+def unlock_student_group(student_id: uuid.UUID, db: Session = Depends(get_db)):
+    enrollment = (
+        db.query(StudentGroupEnrollment)
+        .filter(StudentGroupEnrollment.student_id == student_id)
+        .first()
+    )
+
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="No group enrollment found")
+
+    enrollment.is_locked = False
+    db.commit()
+    return {"message": "Group unlocked"}
+
+
+@router.delete("/lms/students/{student_id}/group")
+def remove_student_group(student_id: uuid.UUID, db: Session = Depends(get_db)):
+    student = db.query(EnrolledStudent).filter(EnrolledStudent.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    enrollment = (
+        db.query(StudentGroupEnrollment)
+        .filter(StudentGroupEnrollment.student_id == student_id)
+        .first()
+    )
+
+    if enrollment:
+        if enrollment.is_locked:
+            raise HTTPException(
+                status_code=400, detail="Group is locked. Contact admin to remove."
+            )
+
+        db.query(StudentSubject).filter(
+            StudentSubject.student_id == student_id,
+            StudentSubject.source_type == SubjectSourceType.group,
+        ).delete()
+
+        db.delete(enrollment)
+
+    student.group_id = None
+    db.commit()
+    return {"message": "Group removed"}
+
+
+def enroll_group_subjects(
+    db: Session, student: EnrolledStudent, group: AcademicGroup, academic_year
+):
+    group_subjects = (
+        db.query(GroupSubject).filter(GroupSubject.group_id == group.id).all()
+    )
+
+    for gs in group_subjects:
+        class_subject = (
+            db.query(ClassSubject)
+            .filter(
+                ClassSubject.class_id == student.class_id,
+                ClassSubject.subject_id == gs.subject_id,
+            )
+            .first()
+        )
+
+        if not class_subject:
+            continue
+
+        existing = (
+            db.query(StudentSubject)
+            .filter(
+                StudentSubject.student_id == student.id,
+                StudentSubject.subject_id == gs.subject_id,
+                StudentSubject.class_id == student.class_id,
+            )
+            .first()
+        )
+
+        if not existing:
+            student_subject = StudentSubject(
+                student_id=student.id,
+                class_id=student.class_id,
+                subject_id=gs.subject_id,
+                class_subject_id=class_subject.id,
+                academic_year_id=academic_year.id if academic_year else None,
+                source_type=SubjectSourceType.group,
+            )
+            db.add(student_subject)
+
+    db.commit()
+
+
+@router.get("/lms/classes/{class_id}/available-groups")
+def get_available_groups_for_class(class_id: uuid.UUID, db: Session = Depends(get_db)):
+    cls = db.query(Class).filter(Class.id == class_id).first()
+    if not cls:
+        raise HTTPException(status_code=404, detail="Class not found")
+
+    grade = cls.grade_level or int(cls.name.split()[-1]) if cls.name else None
+
+    if not grade or grade < 9:
+        return []
+
+    groups = (
+        db.query(AcademicGroup)
+        .join(ClassGroup, ClassGroup.group_id == AcademicGroup.id)
+        .filter(
+            AcademicGroup.is_active == True,
+            ClassGroup.class_id == class_id,
+        )
+        .all()
+    )
+
+    return groups
+
+
+# --- Promotion System ---
+
+
+@router.get("/lms/students/{student_id}/exam-status")
+def get_student_exam_status(student_id: uuid.UUID, db: Session = Depends(get_db)):
+    student = db.query(EnrolledStudent).filter(EnrolledStudent.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    results = db.query(Result).filter(Result.student_id == student_id).all()
+
+    if not results:
+        return {
+            "student_id": student_id,
+            "has_exams": False,
+            "exam_result": "NO_EXAM",
+            "message": "No exam results found",
+        }
+
+    total_marks = sum(r.total_marks for r in results)
+    obtained_marks = sum(r.obtained_marks for r in results)
+    percentage = (obtained_marks / total_marks * 100) if total_marks > 0 else 0
+
+    passing_grades = ["A", "B", "C", "D", "PASS"]
+    is_pass = all(r.grade in passing_grades for r in results)
+
+    return {
+        "student_id": student_id,
+        "has_exams": True,
+        "exam_result": "PASS" if is_pass else "FAIL",
+        "total_marks": total_marks,
+        "obtained_marks": obtained_marks,
+        "percentage": round(percentage, 2),
+        "subjects_passed": sum(1 for r in results if r.grade in passing_grades),
+        "total_subjects": len(results),
+    }
+
+
+@router.get("/lms/classes/{class_id}/students-with-exam-status")
+def get_class_students_with_exam_status(
+    class_id: uuid.UUID, db: Session = Depends(get_db)
+):
+    students = (
+        db.query(EnrolledStudent).filter(EnrolledStudent.class_id == class_id).all()
+    )
+
+    result = []
+    for student in students:
+        exam_info = db.query(Result).filter(Result.student_id == student.id).all()
+
+        if not exam_info:
+            exam_result = "NO_EXAM"
+            is_pass = None
+        else:
+            total_marks = sum(r.total_marks for r in exam_info)
+            obtained_marks = sum(r.obtained_marks for r in exam_info)
+            passing_grades = ["A", "B", "C", "D", "PASS"]
+            is_pass = all(r.grade in passing_grades for r in exam_info)
+            exam_result = "PASS" if is_pass else "FAIL"
+
+        result.append(
+            {
+                "id": student.id,
+                "student_id": student.system_student_id,
+                "first_name": student.first_name,
+                "last_name": student.last_name,
+                "section_id": student.section_id,
+                "group_id": student.group_id,
+                "exam_result": exam_result,
+                "is_pass": is_pass,
+            }
+        )
+
+    return result
+
+
+@router.post("/lms/promotions")
+def promote_students(request: PromoteStudentsRequest, db: Session = Depends(get_db)):
+    current_year = get_current_academic_year(db)
+
+    target_class = db.query(Class).filter(Class.id == request.to_class_id).first()
+    if not target_class:
+        raise HTTPException(status_code=404, detail="Target class not found")
+
+    target_grade = (
+        target_class.grade_level or int(target_class.name.split()[-1])
+        if target_class.name
+        else None
+    )
+
+    students_to_promote = []
+
+    if request.promote_all_eligible:
+        all_students = db.query(EnrolledStudent).all()
+        for student in all_students:
+            results = db.query(Result).filter(Result.student_id == student.id).all()
+            passing_grades = ["A", "B", "C", "D", "PASS"]
+            is_pass = (
+                all(r.grade in passing_grades for r in results) if results else False
+            )
+
+            if is_pass or request.allow_failed:
+                students_to_promote.append(student)
+    elif request.promote_all_except:
+        all_students = db.query(EnrolledStudent).all()
+        except_ids = [str(sid) for sid in request.student_ids]
+        for student in all_students:
+            if str(student.id) not in except_ids:
+                results = db.query(Result).filter(Result.student_id == student.id).all()
+                passing_grades = ["A", "B", "C", "D", "PASS"]
+                is_pass = (
+                    all(r.grade in passing_grades for r in results)
+                    if results
+                    else False
+                )
+
+                if is_pass or request.allow_failed:
+                    students_to_promote.append(student)
+    else:
+        for student_id in request.student_ids:
+            student = (
+                db.query(EnrolledStudent)
+                .filter(EnrolledStudent.id == student_id)
+                .first()
+            )
+            if student:
+                students_to_promote.append(student)
+
+    promoted_count = 0
+    for student in students_to_promote:
+        old_class_id = student.class_id
+        old_section_id = student.section_id
+        old_group_id = student.group_id
+
+        results = db.query(Result).filter(Result.student_id == student.id).all()
+        passing_grades = ["A", "B", "C", "D", "PASS"]
+        is_pass = all(r.grade in passing_grades for r in results) if results else False
+        exam_result = "PASS" if is_pass else "FAIL"
+
+        # Update student class
+        student.class_id = request.to_class_id
+
+        # Auto-assign section if not provided
+        if not request.to_section_id:
+            target_class_obj = (
+                db.query(Class).filter(Class.id == request.to_class_id).first()
+            )
+            if target_class_obj and target_class_obj.sections:
+                available_section = None
+                for section in target_class_obj.sections:
+                    current_count = (
+                        db.query(EnrolledStudent)
+                        .filter(EnrolledStudent.section_id == section.id)
+                        .count()
+                    )
+                    if current_count < (section.capacity or 30):
+                        available_section = section
+                        break
+
+                if available_section:
+                    student.section_id = available_section.id
+                else:
+                    db.rollback()
+                    return {
+                        "error": f"All sections for class {target_class_obj.name} are at full capacity. Please create more sections or increase capacity."
+                    }
+            else:
+                db.rollback()
+                return {
+                    "error": "No sections available for the target class. Please create sections first."
+                }
+        else:
+            student.section_id = request.to_section_id
+
+        if request.to_group_id:
+            student.group_id = request.to_group_id
+
+        promotion_record = PromotionHistory(
+            student_id=student.id,
+            from_class_id=old_class_id,
+            to_class_id=request.to_class_id,
+            from_section_id=old_section_id,
+            to_section_id=student.section_id,
+            from_group_id=old_group_id,
+            to_group_id=request.to_group_id,
+            from_academic_year_id=current_year.id if current_year else None,
+            to_academic_year_id=request.to_academic_year_id
+            or (current_year.id if current_year else None),
+            exam_result=exam_result,
+            promoted=True,
+        )
+        db.add(promotion_record)
+        promoted_count += 1
+
+    db.commit()
+    return {"message": f"Successfully promoted {promoted_count} students"}
+
+
+@router.post("/lms/promotions/{promotion_id}/undo")
+def undo_promotion(promotion_id: uuid.UUID, db: Session = Depends(get_db)):
+    promotion = (
+        db.query(PromotionHistory).filter(PromotionHistory.id == promotion_id).first()
+    )
+    if not promotion:
+        raise HTTPException(status_code=404, detail="Promotion record not found")
+
+    if promotion.is_undone:
+        raise HTTPException(
+            status_code=400, detail="This promotion has already been undone"
+        )
+
+    student = (
+        db.query(EnrolledStudent)
+        .filter(EnrolledStudent.id == promotion.student_id)
+        .first()
+    )
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    student.class_id = promotion.from_class_id
+    student.section_id = promotion.from_section_id
+
+    group_enrollment = (
+        db.query(StudentGroupEnrollment)
+        .filter(StudentGroupEnrollment.student_id == student.id)
+        .first()
+    )
+
+    if promotion.from_group_id:
+        if group_enrollment:
+            group_enrollment.group_id = promotion.from_group_id
+        else:
+            new_enrollment = StudentGroupEnrollment(
+                student_id=student.id,
+                group_id=promotion.from_group_id,
+                academic_year_id=promotion.from_academic_year_id,
+            )
+            db.add(new_enrollment)
+    elif group_enrollment:
+        db.delete(group_enrollment)
+
+    promotion.is_undone = True
+    promotion.undone_at = datetime.utcnow()
+
+    db.commit()
+    return {"message": "Promotion undone successfully"}
+
+
+@router.get("/lms/promotions/history")
+def get_promotion_history(
+    class_id: Optional[uuid.UUID] = None, db: Session = Depends(get_db)
+):
+    query = db.query(PromotionHistory)
+
+    if class_id:
+        query = query.filter(
+            (PromotionHistory.from_class_id == class_id)
+            | (PromotionHistory.to_class_id == class_id)
+        )
+
+    promotions = query.order_by(PromotionHistory.promoted_at.desc()).all()
+
+    result = []
+    for p in promotions:
+        student = (
+            db.query(EnrolledStudent).filter(EnrolledStudent.id == p.student_id).first()
+        )
+        from_class = db.query(Class).filter(Class.id == p.from_class_id).first()
+        to_class = db.query(Class).filter(Class.id == p.to_class_id).first()
+
+        result.append(
+            {
+                "id": p.id,
+                "student_id": p.student_id,
+                "from_class_id": p.from_class_id,
+                "to_class_id": p.to_class_id,
+                "from_section_id": p.from_section_id,
+                "to_section_id": p.to_section_id,
+                "from_group_id": p.from_group_id,
+                "to_group_id": p.to_group_id,
+                "from_academic_year_id": p.from_academic_year_id,
+                "to_academic_year_id": p.to_academic_year_id,
+                "exam_result": p.exam_result,
+                "promoted": p.promoted,
+                "promoted_at": p.promoted_at.isoformat() if p.promoted_at else None,
+                "is_undone": p.is_undone,
+                "undone_at": p.undone_at.isoformat() if p.undone_at else None,
+                "student": {
+                    "first_name": student.first_name,
+                    "last_name": student.last_name,
+                    "system_student_id": student.system_student_id,
+                }
+                if student
+                else None,
+                "from_class": {"id": str(from_class.id), "name": from_class.name}
+                if from_class
+                else None,
+                "to_class": {"id": str(to_class.id), "name": to_class.name}
+                if to_class
+                else None,
+            }
+        )
+
+    return result

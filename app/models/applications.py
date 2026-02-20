@@ -59,6 +59,9 @@ class StudentApplication(Base):
     address = Column(Text, nullable=False)
     b_form_number = Column(String, nullable=True)  # Added for enrollment
     applying_for_class = Column(String, nullable=False)
+    group_id = Column(
+        UUID(as_uuid=True), ForeignKey("academic_groups.id"), nullable=True
+    )
     previous_school = Column(String)
 
     applied_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -87,7 +90,8 @@ class EmployeeApplication(Base):
 
     # Professional
     position_applied_for = Column(String, nullable=False)
-    subject = Column(String)
+    subject = Column(String)  # Legacy field - stores comma-separated subject names
+    subjects = Column(String)  # New field - stores comma-separated subject IDs
     highest_qualification = Column(Text, nullable=False)
     experience_years = Column(String, nullable=False)
     cv_url = Column(String, nullable=False)
