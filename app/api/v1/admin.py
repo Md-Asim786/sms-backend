@@ -874,10 +874,10 @@ def enroll_student(
     db.commit()
     db.refresh(new_student)
 
-    current_year = get_current_academic_year(db)
     auto_enroll_student_subjects(
         db, new_student.id, target_class.id, current_year.id if current_year else None
     )
+    db.commit()
 
     return {
         "message": "Student enrolled successfully",
@@ -1265,10 +1265,11 @@ def enroll_student_manual(
     db.commit()
     db.refresh(new_student)
 
-    current_year = get_current_academic_year(db)
     auto_enroll_student_subjects(
         db, new_student.id, target_class.id, current_year.id if current_year else None
     )
+    db.commit()
+    db.refresh(new_student)
 
     return new_student
 
@@ -1301,6 +1302,7 @@ def get_enrolled_students(db: Session = Depends(get_db)):
             "class_id": student.class_id,
             "section_id": student.section_id,
             "group_id": student.group_id,
+            "applying_for_class": student.applying_for_class,
             "city": student.city,
             "address": student.address,
             "user_id": student.user_id,
@@ -1416,6 +1418,9 @@ def update_enrolled_student(
         if not target_class:
             raise HTTPException(status_code=404, detail="Target class not found")
 
+        if student.class_id != new_class_id:
+            update_dict["applying_for_class"] = target_class.name
+            
         if student.class_id != new_class_id and not new_section_id:
             available_section = None
             for section in target_class.sections:
@@ -2754,11 +2759,11 @@ def promote_students(request: PromoteStudentsRequest, db: Session = Depends(get_
     if not target_class:
         raise HTTPException(status_code=404, detail="Target class not found")
 
-    target_grade = (
-        target_class.grade_level or int(target_class.name.split()[-1])
-        if target_class.name
-        else None
-    )
+    target_grade = target_class.grade_level
+    if target_grade is None and target_class.name:
+        parts = target_class.name.split()
+        if parts and parts[-1].isdigit():
+            target_grade = int(parts[-1])
 
     students_to_promote = []
 
@@ -2800,6 +2805,34 @@ def promote_students(request: PromoteStudentsRequest, db: Session = Depends(get_
 
     promoted_count = 0
     for student in students_to_promote:
+        # Fetch current class grade level for validation
+        current_class = db.query(Class).filter(Class.id == student.class_id).first()
+        current_grade = None
+        if current_class:
+            if current_class.grade_level:
+                current_grade = current_class.grade_level
+            else:
+                parts = current_class.name.split()
+                if parts and parts[-1].isdigit():
+                    current_grade = int(parts[-1])
+
+        # 1. Validation: Immediate Next Class
+        if current_grade is not None and target_grade is not None:
+            if target_grade != current_grade + 1:
+                db.rollback()
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Student {student.first_name} {student.last_name} cannot be promoted from {current_class.name} to {target_class.name}. Promotions must be to the immediate next class.",
+                )
+
+        # 2. Validation: Required Academic Group for Class 9+
+        if target_grade is not None and target_grade >= 9 and not request.to_group_id:
+            db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail=f"Promoting to {target_class.name} requires an academic group to be selected.",
+            )
+
         old_class_id = student.class_id
         old_section_id = student.section_id
         old_group_id = student.group_id
@@ -2809,17 +2842,17 @@ def promote_students(request: PromoteStudentsRequest, db: Session = Depends(get_
         is_pass = all(r.grade in passing_grades for r in results) if results else False
         exam_result = "PASS" if is_pass else "FAIL"
 
-        # Update student class
+        # Update student class data
         student.class_id = request.to_class_id
+        student.applying_for_class = target_class.name  # Global data update
+        db.add(student)
+        db.flush()
 
         # Auto-assign section if not provided
         if not request.to_section_id:
-            target_class_obj = (
-                db.query(Class).filter(Class.id == request.to_class_id).first()
-            )
-            if target_class_obj and target_class_obj.sections:
+            if target_class and target_class.sections:
                 available_section = None
-                for section in target_class_obj.sections:
+                for section in target_class.sections:
                     current_count = (
                         db.query(EnrolledStudent)
                         .filter(EnrolledStudent.section_id == section.id)
@@ -2833,19 +2866,26 @@ def promote_students(request: PromoteStudentsRequest, db: Session = Depends(get_
                     student.section_id = available_section.id
                 else:
                     db.rollback()
-                    return {
-                        "error": f"All sections for class {target_class_obj.name} are at full capacity. Please create more sections or increase capacity."
-                    }
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"All sections for class {target_class.name} are at full capacity.",
+                    )
             else:
                 db.rollback()
-                return {
-                    "error": "No sections available for the target class. Please create sections first."
-                }
+                raise HTTPException(
+                    status_code=400,
+                    detail="No sections available for the target class.",
+                )
         else:
             student.section_id = request.to_section_id
 
         if request.to_group_id:
             student.group_id = request.to_group_id
+
+        # Auto-enroll new subjects for the new class
+        auto_enroll_student_subjects(
+            db, student.id, target_class.id, current_year.id if current_year else None
+        )
 
         promotion_record = PromotionHistory(
             student_id=student.id,
@@ -2864,7 +2904,12 @@ def promote_students(request: PromoteStudentsRequest, db: Session = Depends(get_
         db.add(promotion_record)
         promoted_count += 1
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error during promotion: {str(e)}")
+        
     return {"message": f"Successfully promoted {promoted_count} students"}
 
 
@@ -2891,6 +2936,12 @@ def undo_promotion(promotion_id: uuid.UUID, db: Session = Depends(get_db)):
 
     student.class_id = promotion.from_class_id
     student.section_id = promotion.from_section_id
+    
+    # Sync display class name
+    if promotion.from_class:
+        student.applying_for_class = promotion.from_class.name
+    
+    student.group_id = promotion.from_group_id
 
     group_enrollment = (
         db.query(StudentGroupEnrollment)

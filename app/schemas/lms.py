@@ -10,6 +10,7 @@ from app.models.lms import (
     SubjectSourceType,
     ProgramLevel,
 )
+from app.schemas.users import EnrolledStudentResponse, EnrolledEmployeeResponse
 
 
 class AcademicYearBase(BaseModel):
@@ -194,7 +195,7 @@ class TeacherSubjectCreate(TeacherSubjectBase):
 class TeacherSubjectResponse(TeacherSubjectBase):
     id: UUID
     assigned_at: datetime
-    teacher: Optional[dict] = None
+    teacher: Optional[EnrolledEmployeeResponse] = None
     subject: Optional[SubjectResponse] = None
     class_: Optional[ClassResponse] = None
     section: Optional[SectionResponse] = None
@@ -306,7 +307,7 @@ class PromotionHistoryResponse(PromotionHistoryBase):
     promoted_at: datetime
     is_undone: bool = False
     undone_at: Optional[datetime] = None
-    student: Optional[dict] = None
+    student: Optional[EnrolledStudentResponse] = None
     from_class: Optional[ClassResponse] = None
     to_class: Optional[ClassResponse] = None
 
