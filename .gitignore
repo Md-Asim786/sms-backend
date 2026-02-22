@@ -1,5 +1,5 @@
 uploads/
 __pycache__
 .env
-.myenv
-.venv
+myenv
+venv

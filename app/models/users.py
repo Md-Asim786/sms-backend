@@ -104,8 +104,8 @@ class EnrolledEmployee(Base):
     # Linked User Account
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
 
-    lms_email = Column(String, unique=True, nullable=False)
-    lms_login = Column(String, unique=True, nullable=False)
+    lms_email = Column(String, unique=True, nullable=True)
+    lms_login = Column(String, unique=True, nullable=True)
     lms_password = Column(String)
 
     user = relationship("app.models.auth.User")

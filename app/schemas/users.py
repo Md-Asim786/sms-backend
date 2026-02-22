@@ -42,6 +42,7 @@ class EnrolledStudentResponse(EnrolledStudentBase):
 
 
 class EnrolledStudentUpdate(BaseModel):
+    reg_id: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     gender: Optional[str] = None
@@ -55,6 +56,8 @@ class EnrolledStudentUpdate(BaseModel):
     guardian_email: Optional[str] = None
     class_id: Optional[UUID] = None
     section_id: Optional[UUID] = None
+    group_id: Optional[UUID] = None
+    applying_for_class: Optional[str] = None
     city: Optional[str] = None
     address: Optional[str] = None
     lms_email: Optional[str] = None
@@ -84,9 +87,9 @@ class EnrolledEmployeeBase(BaseModel):
     experience_years: str
     current_organization: Optional[str] = None
     cv_url: Optional[str] = None
-    lms_email: str
-    lms_login: str
-    lms_password: str
+    lms_email: Optional[str] = None
+    lms_login: Optional[str] = None
+    lms_password: Optional[str] = None
 
 
 class EnrolledEmployeeCreate(BaseModel):

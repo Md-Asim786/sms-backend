@@ -377,15 +377,31 @@ def delete_class(class_id: uuid.UUID, db: Session = Depends(get_db)):
 @router.post("/lms/classes/bulk", response_model=List[ClassResponse])
 def create_classes_bulk(bulk_in: BulkClassCreate, db: Session = Depends(get_db)):
     created_classes = []
-    for cls_data in bulk_in.classes:
-        query = db.query(Class).filter(Class.name == cls_data.name)
-        if cls_data.group:
-            query = query.filter(Class.group == cls_data.group)
-        exists = query.first()
+    for cls_in in bulk_in.classes:
+        # Check if class with same name already exists
+        exists = db.query(Class).filter(Class.name == cls_in.name).first()
+
         if not exists:
-            new_cls = Class(**cls_data.model_dump())
+            class_data = cls_in.model_dump()
+            group_ids = class_data.pop("group_ids", None)
+
+            new_cls = Class(**class_data)
             db.add(new_cls)
+            db.flush()  # Get ID
+
+            if group_ids:
+                for group_id in group_ids:
+                    group = (
+                        db.query(AcademicGroup)
+                        .filter(AcademicGroup.id == group_id)
+                        .first()
+                    )
+                    if group:
+                        association = ClassGroup(class_id=new_cls.id, group_id=group_id)
+                        db.add(association)
+
             created_classes.append(new_cls)
+
     db.commit()
     for cls in created_classes:
         db.refresh(cls)
@@ -772,6 +788,19 @@ def enroll_student(
             detail=f"All sections for {application.applying_for_class} are at full capacity.",
         )
 
+    # Check for duplicate B-Form in enrolled students
+    if application.b_form_number:
+        enrolled = (
+            db.query(EnrolledStudent)
+            .filter(EnrolledStudent.b_form_number == application.b_form_number)
+            .first()
+        )
+        if enrolled:
+            raise HTTPException(
+                status_code=400,
+                detail=f"A student with this B-Form/CNIC number already exists in our records as {enrolled.first_name} {enrolled.last_name} (Class: {enrolled.applying_for_class}).",
+            )
+
     # 2.5 Check if already enrolled
     if application.status == StudentApplicationStatus.accepted:
         # Check if really in enrolled_students to be safe
@@ -865,11 +894,7 @@ def enroll_student(
 
 @router.get("/employee-applications")
 def get_employee_applications(db: Session = Depends(get_db)):
-    return (
-        db.query(EmployeeApplication)
-        .filter(EmployeeApplication.status == EmployeeApplicationStatus.applied)
-        .all()
-    )
+    return db.query(EmployeeApplication).all()
 
 
 @router.post("/employee-applications/{app_id}/interview")
@@ -954,6 +979,18 @@ def hire_employee(
     lms_password_plain = f"{settings.SCHOOL_NAME_ABBR}@{emp_id}"
     employee_email = application.email
 
+    # Check for duplicate email
+    existing_employee = (
+        db.query(EnrolledEmployee)
+        .filter(EnrolledEmployee.lms_email == employee_email)
+        .first()
+    )
+    if existing_employee:
+        raise HTTPException(
+            status_code=400,
+            detail=f"An enrolled employee with email {employee_email} already exists.",
+        )
+
     # 1. Create User Account (Only for teachers)
     user = None
     if system_role == "teacher":
@@ -984,9 +1021,9 @@ def hire_employee(
         experience_years=application.experience_years,
         current_organization=application.current_organization,
         cv_url=application.cv_url,
-        lms_email=employee_email,
-        lms_login=lms_login,
-        lms_password=lms_password_plain,
+        lms_email=employee_email if system_role == "teacher" else None,
+        lms_login=lms_login if system_role == "teacher" else None,
+        lms_password=lms_password_plain if system_role == "teacher" else None,
         user_id=user.id if user else None,
         is_active=True,
     )
@@ -1036,6 +1073,29 @@ def enroll_employee_manual(
     lms_password_plain = f"{settings.SCHOOL_NAME_ABBR}@{emp_id}"
     employee_email = email
 
+    # Duplicate check (CNIC)
+    existing_cnic = (
+        db.query(EnrolledEmployee).filter(EnrolledEmployee.cnic == cnic).first()
+    )
+    if existing_cnic:
+        raise HTTPException(
+            status_code=400,
+            detail=f"An employee with this CNIC number is already enrolled.",
+        )
+
+    # Duplicate check (Email - for Teachers)
+    if system_role == "teacher":
+        existing_email = (
+            db.query(EnrolledEmployee)
+            .filter(EnrolledEmployee.lms_email == employee_email)
+            .first()
+        )
+        if existing_email:
+            raise HTTPException(
+                status_code=400,
+                detail=f"An enrolled employee with email {employee_email} already exists.",
+            )
+
     # 0. Save photo
     photo_filename = f"emp_{uuid.uuid4()}_{photo.filename}"
     photo_path = os.path.join(settings.UPLOAD_DIR, "photos", photo_filename)
@@ -1072,9 +1132,9 @@ def enroll_employee_manual(
         experience_years=experience_years,
         current_organization=current_organization,
         cv_url="#",  # Placeholder since manual doesn't upload CV
-        lms_email=employee_email,
-        lms_login=lms_login,
-        lms_password=lms_password_plain,
+        lms_email=employee_email if system_role == "teacher" else None,
+        lms_login=lms_login if system_role == "teacher" else None,
+        lms_password=lms_password_plain if system_role == "teacher" else None,
         user_id=user.id if user else None,
         is_active=True,
     )
@@ -1113,6 +1173,19 @@ def enroll_student_manual(
             status_code=400,
             detail=f"Class '{applying_for_class}' not found. Please create it in Academic Section first.",
         )
+
+    # Uniqueness check (B-Form)
+    if b_form_number:
+        enrolled = (
+            db.query(EnrolledStudent)
+            .filter(EnrolledStudent.b_form_number == b_form_number)
+            .first()
+        )
+        if enrolled:
+            raise HTTPException(
+                status_code=400,
+                detail=f"A student with this B-Form/CNIC number already exists in our records as {enrolled.first_name} {enrolled.last_name} (Class: {enrolled.applying_for_class}).",
+            )
 
     # 2. Find Available Section
     available_section = None
@@ -1270,59 +1343,98 @@ def get_enrolled_students(db: Session = Depends(get_db)):
 @router.patch("/enrolled-students/{student_id}")
 def update_enrolled_student(
     student_id: uuid.UUID,
-    student_data: EnrolledStudentUpdate,
+    first_name: Optional[str] = Form(None),
+    last_name: Optional[str] = Form(None),
+    gender: Optional[str] = Form(None),
+    date_of_birth: Optional[str] = Form(None),
+    b_form_number: Optional[str] = Form(None),
+    student_cnic: Optional[str] = Form(None),
+    guardian_name: Optional[str] = Form(None),
+    guardian_cnic: Optional[str] = Form(None),
+    guardian_phone: Optional[str] = Form(None),
+    guardian_email: Optional[str] = Form(None),
+    class_id: Optional[uuid.UUID] = Form(None),
+    section_id: Optional[uuid.UUID] = Form(None),
+    group_id: Optional[uuid.UUID] = Form(None),
+    applying_for_class: Optional[str] = Form(None),
+    city: Optional[str] = Form(None),
+    address: Optional[str] = Form(None),
+    lms_email: Optional[str] = Form(None),
+    lms_login: Optional[str] = Form(None),
+    lms_password: Optional[str] = Form(None),
+    is_active: Optional[bool] = Form(None),
+    reg_id: Optional[str] = Form(None),
+    photo: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
 ):
     student = db.query(EnrolledStudent).filter(EnrolledStudent.id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    update_dict = student_data.model_dump(exclude_unset=True)
+    update_data = {
+        "first_name": first_name,
+        "last_name": last_name,
+        "gender": gender,
+        "date_of_birth": date_of_birth,
+        "b_form_number": b_form_number,
+        "student_cnic": student_cnic,
+        "guardian_name": guardian_name,
+        "guardian_cnic": guardian_cnic,
+        "guardian_phone": guardian_phone,
+        "guardian_email": guardian_email,
+        "class_id": class_id,
+        "section_id": section_id,
+        "group_id": group_id,
+        "applying_for_class": applying_for_class,
+        "city": city,
+        "address": address,
+        "lms_email": lms_email,
+        "lms_login": lms_login,
+        "lms_password": lms_password,
+        "is_active": is_active,
+        "reg_id": reg_id,
+    }
 
-    # Handle class/section change - remove null values to preserve existing
-    if "class_id" in update_dict and not update_dict["class_id"]:
-        del update_dict["class_id"]
-    if "section_id" in update_dict and not update_dict["section_id"]:
-        del update_dict["section_id"]
+    # Filter out None values to only update provided fields
+    update_dict = {k: v for k, v in update_data.items() if v is not None}
 
+    # Handle Photo Upload
+    if photo:
+        photo_filename = f"stu_{uuid.uuid4()}_{photo.filename}"
+        photo_path = os.path.join(settings.UPLOAD_DIR, "photos", photo_filename)
+        os.makedirs(os.path.dirname(photo_path), exist_ok=True)
+        with open(photo_path, "wb") as buffer:
+            shutil.copyfileobj(photo.file, buffer)
+        update_dict["student_photo_url"] = f"/uploads/photos/{photo_filename}"
+
+    # Handle class/section change logic (similar to before)
     new_class_id = update_dict.get("class_id")
     new_section_id = update_dict.get("section_id")
 
     if new_class_id:
-        target_class_id = new_class_id
-        target_class = db.query(Class).filter(Class.id == target_class_id).first()
-
+        target_class = db.query(Class).filter(Class.id == new_class_id).first()
         if not target_class:
             raise HTTPException(status_code=404, detail="Target class not found")
 
-        # If class changed and no section specified, auto-assign
         if student.class_id != new_class_id and not new_section_id:
             available_section = None
-            if target_class.sections:
-                for section in target_class.sections:
-                    current_count = (
-                        db.query(EnrolledStudent)
-                        .filter(EnrolledStudent.section_id == section.id)
-                        .count()
-                    )
-                    if current_count < (section.capacity or 30):
-                        available_section = section
-                        break
-
-                if available_section:
-                    update_dict["section_id"] = available_section.id
-                else:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"All sections for {target_class.name} are at full capacity",
-                    )
+            for section in target_class.sections:
+                current_count = (
+                    db.query(EnrolledStudent)
+                    .filter(EnrolledStudent.section_id == section.id)
+                    .count()
+                )
+                if current_count < (section.capacity or 30):
+                    available_section = section
+                    break
+            if available_section:
+                update_dict["section_id"] = available_section.id
             else:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"No sections found for {target_class.name}. Please create sections first.",
+                    detail=f"All sections for {target_class.name} are at full capacity",
                 )
         elif new_section_id:
-            # Check capacity for specified section
             section = db.query(Section).filter(Section.id == new_section_id).first()
             if section:
                 current_count = (
@@ -1337,7 +1449,7 @@ def update_enrolled_student(
                         detail=f"Section {section.name} is at full capacity",
                     )
 
-    # Handle User account updates if credentials changed
+    # Handle User account updates
     if "lms_password" in update_dict or "lms_email" in update_dict:
         user = db.query(User).filter(User.id == student.user_id).first()
         if user:
@@ -1355,7 +1467,7 @@ def update_enrolled_student(
     db.commit()
     db.refresh(student)
 
-    # Return updated student with class/section names
+    # Return updated student
     result = {
         "id": student.id,
         "reg_id": student.reg_id,
@@ -1442,12 +1554,28 @@ def get_enrolled_employee(employee_id: uuid.UUID, db: Session = Depends(get_db))
     return employee
 
 
-@router.patch(
-    "/enrolled-employees/{employee_id}", response_model=EnrolledEmployeeResponse
-)
+@router.patch("/enrolled-employees/{employee_id}")
 def update_enrolled_employee(
     employee_id: uuid.UUID,
-    employee_data: EnrolledEmployeeUpdate,
+    first_name: Optional[str] = Form(None),
+    last_name: Optional[str] = Form(None),
+    gender: Optional[str] = Form(None),
+    date_of_birth: Optional[str] = Form(None),
+    phone: Optional[str] = Form(None),
+    email: Optional[str] = Form(None),
+    cnic: Optional[str] = Form(None),
+    employee_type: Optional[str] = Form(None),
+    functional_role: Optional[str] = Form(None),
+    system_role: Optional[str] = Form(None),
+    subject: Optional[str] = Form(None),
+    highest_qualification: Optional[str] = Form(None),
+    experience_years: Optional[str] = Form(None),
+    current_organization: Optional[str] = Form(None),
+    lms_email: Optional[str] = Form(None),
+    lms_login: Optional[str] = Form(None),
+    lms_password: Optional[str] = Form(None),
+    is_active: Optional[bool] = Form(None),
+    photo: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
 ):
     employee = (
@@ -1455,8 +1583,55 @@ def update_enrolled_employee(
     )
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
-    for key, value in employee_data.model_dump(exclude_unset=True).items():
+
+    update_data = {
+        "first_name": first_name,
+        "last_name": last_name,
+        "gender": gender,
+        "date_of_birth": date_of_birth,
+        "phone": phone,
+        "email": email,
+        "cnic": cnic,
+        "employee_type": employee_type,
+        "functional_role": functional_role,
+        "system_role": system_role,
+        "subject": subject,
+        "highest_qualification": highest_qualification,
+        "experience_years": experience_years,
+        "current_organization": current_organization,
+        "lms_email": lms_email,
+        "lms_login": lms_login,
+        "lms_password": lms_password,
+        "is_active": is_active,
+    }
+
+    # Filter out None values
+    update_dict = {k: v for k, v in update_data.items() if v is not None}
+
+    # Handle Photo Upload
+    if photo:
+        photo_filename = f"emp_{uuid.uuid4()}_{photo.filename}"
+        photo_path = os.path.join(settings.UPLOAD_DIR, "photos", photo_filename)
+        os.makedirs(os.path.dirname(photo_path), exist_ok=True)
+        with open(photo_path, "wb") as buffer:
+            shutil.copyfileobj(photo.file, buffer)
+        update_dict["photo_url"] = f"/uploads/photos/{photo_filename}"
+
+    # Handle User account updates
+    if "lms_password" in update_dict or "lms_email" in update_dict:
+        user = db.query(User).filter(User.id == employee.user_id).first()
+        if user:
+            if "lms_password" in update_dict:
+                user.password_hash = security.get_password_hash(
+                    update_dict["lms_password"]
+                )
+            if "lms_email" in update_dict:
+                user.email = update_dict["lms_email"]
+            db.add(user)
+
+    for key, value in update_dict.items():
         setattr(employee, key, value)
+
     db.commit()
     db.refresh(employee)
     return employee

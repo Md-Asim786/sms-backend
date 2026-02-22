@@ -16,6 +16,8 @@ from app.models import (
     EmployeeApplication,
     SchoolConfig,
     Subject,
+    EnrolledStudent,
+    EnrolledEmployee,
 )
 from app.models.applications import StudentApplicationStatus, EmployeeApplicationStatus
 from app.schemas import (
@@ -128,16 +130,29 @@ async def apply_student(
 
     # Check for duplicate applications using Student B-Form/CNIC
     if b_form_number:
-        existing_by_bform = (
+        # Check current applications
+        existing_app = (
             db.query(StudentApplication)
             .filter(StudentApplication.b_form_number == b_form_number)
             .first()
         )
-        if existing_by_bform:
-            status_display = existing_by_bform.status.value.capitalize()
+        if existing_app:
+            status_display = existing_app.status.value.capitalize()
             raise HTTPException(
                 status_code=409,
-                detail=f"You have already submitted an application with this B-Form/CNIC number. Your current application status is: {status_display}. Please use your Registration ID: {existing_by_bform.regId} to check your application status.",
+                detail=f"You have already submitted an application with this B-Form/CNIC number. Your current application status is: {status_display}. Please use your Registration ID: {existing_app.regId} to check your application status.",
+            )
+        
+        # Check enrolled students
+        enrolled = (
+            db.query(EnrolledStudent)
+            .filter(EnrolledStudent.b_form_number == b_form_number)
+            .first()
+        )
+        if enrolled:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A student with this B-Form/CNIC number already exists in our records as {enrolled.first_name} {enrolled.last_name} (Class: {enrolled.applying_for_class}).",
             )
 
     # Save photo
@@ -194,14 +209,44 @@ async def apply_employee(
     db: Session = Depends(get_db),
 ):
     # Check for duplicate applications using CNIC
+    # 1. Check current applications (CNIC)
     existing_application = (
         db.query(EmployeeApplication).filter(EmployeeApplication.cnic == cnic).first()
     )
-
     if existing_application:
         raise HTTPException(
             status_code=409,
             detail=f"An application has already been submitted with this CNIC number. Your previous application status is: {existing_application.status.value}",
+        )
+
+    # 2. Check current applications (Email)
+    existing_app_email = (
+        db.query(EmployeeApplication).filter(EmployeeApplication.email == email).first()
+    )
+    if existing_app_email:
+         raise HTTPException(
+            status_code=409,
+            detail=f"An application with this email address has already been submitted.",
+        )
+
+    # 3. Check enrolled employees (CNIC)
+    enrolled_cnic = (
+        db.query(EnrolledEmployee).filter(EnrolledEmployee.cnic == cnic).first()
+    )
+    if enrolled_cnic:
+        raise HTTPException(
+            status_code=409,
+            detail=f"An employee with this CNIC number is already enrolled as {enrolled_cnic.first_name} {enrolled_cnic.last_name}.",
+        )
+
+    # 4. Check enrolled employees (Email)
+    enrolled_email = (
+        db.query(EnrolledEmployee).filter(EnrolledEmployee.email == email).first()
+    )
+    if enrolled_email:
+        raise HTTPException(
+            status_code=409,
+            detail=f"An employee with this email address is already enrolled.",
         )
 
     # Save CV
