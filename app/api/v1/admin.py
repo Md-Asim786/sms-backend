@@ -44,11 +44,15 @@ from app.schemas import (
     FeePaymentBase,
     FeePaymentResponse,
     NewsResponse,
-    JobCategoryResponse,
-    JobPositionResponse,
     LeadershipMemberResponse,
     SchoolConfigBase,
     SchoolConfigResponse,
+    JobCategoryCreate,
+    JobCategoryUpdate,
+    JobCategoryResponse,
+    JobPositionBase,
+    JobPositionCreate,
+    JobPositionResponse,
 )
 from app.schemas.users import (
     EnrolledStudentUpdate,
@@ -1952,31 +1956,33 @@ def delete_news(news_id: int, db: Session = Depends(get_db)):
 # --- Job Management ---
 
 
-@router.post("/job-categories")
+@router.post("/job-categories", response_model=JobCategoryResponse)
 def create_job_category(
-    title: str, description: Optional[str] = None, db: Session = Depends(get_db)
+    cat_in: JobCategoryCreate, db: Session = Depends(get_db)
 ):
-    cat = JobCategory(title=title, description=description)
+    cat = JobCategory(**cat_in.model_dump())
     db.add(cat)
     db.commit()
+    db.refresh(cat)
     return cat
 
 
-@router.patch("/job-categories/{category_id}")
+@router.patch("/job-categories/{category_id}", response_model=JobCategoryResponse)
 def update_job_category(
     category_id: uuid.UUID,
-    title: Optional[str] = None,
-    description: Optional[str] = None,
+    cat_in: JobCategoryUpdate,
     db: Session = Depends(get_db),
 ):
     cat = db.query(JobCategory).filter(JobCategory.id == category_id).first()
     if not cat:
         raise HTTPException(status_code=404, detail="Job category not found")
-    if title:
-        cat.title = title
-    if description:
-        cat.description = description
+    
+    update_data = cat_in.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(cat, field, value)
+    
     db.commit()
+    db.refresh(cat)
     return cat
 
 
@@ -1990,31 +1996,33 @@ def delete_job_category(category_id: uuid.UUID, db: Session = Depends(get_db)):
     return {"message": "Job category deleted successfully"}
 
 
-@router.post("/job-positions")
+@router.post("/job-positions", response_model=JobPositionResponse)
 def create_job_position(
-    category_id: uuid.UUID, title: str, db: Session = Depends(get_db)
+    pos_in: JobPositionCreate, db: Session = Depends(get_db)
 ):
-    pos = JobPosition(category_id=category_id, title=title)
+    pos = JobPosition(**pos_in.model_dump())
     db.add(pos)
     db.commit()
+    db.refresh(pos)
     return pos
 
 
-@router.patch("/job-positions/{position_id}")
+@router.patch("/job-positions/{position_id}", response_model=JobPositionResponse)
 def update_job_position(
     position_id: uuid.UUID,
-    title: Optional[str] = None,
-    category_id: Optional[uuid.UUID] = None,
+    pos_in: JobPositionBase,
     db: Session = Depends(get_db),
 ):
     pos = db.query(JobPosition).filter(JobPosition.id == position_id).first()
     if not pos:
         raise HTTPException(status_code=404, detail="Job position not found")
-    if title:
-        pos.title = title
-    if category_id:
-        pos.category_id = category_id
+    
+    update_data = pos_in.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(pos, field, value)
+        
     db.commit()
+    db.refresh(pos)
     return pos
 
 

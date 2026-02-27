@@ -27,3 +27,12 @@ from app.models.website import (
     News,
     LeadershipMember,
 )
+from app.models.timetable import (
+    Room,
+    TimetableConfig,
+    TimetableVersion,
+    TimetableSlot,
+    TeacherConstraint,
+    SubjectConstraint,
+)
+

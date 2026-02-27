@@ -10,6 +10,8 @@ from app.api.v1 import (
     auth_router,
     students_router,
     lms_router,
+    timetable_router,
+    user_profile_router,
 )
 
 app = FastAPI(
@@ -22,6 +24,10 @@ origins = [
     "http://localhost:3001",  # school-website
     "http://localhost:3002",  # school-student-portal
     "http://localhost:3003",  # school-lms
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://127.0.0.1:3002",
+    "http://127.0.0.1:3003",
 ]
 
 app.add_middleware(
@@ -40,6 +46,11 @@ if not os.path.exists(settings.UPLOAD_DIR):
     os.makedirs(os.path.join(settings.UPLOAD_DIR, "photos"))
     os.makedirs(os.path.join(settings.UPLOAD_DIR, "cvs"))
 
+# Create LMS upload directory
+lms_upload_dir = os.path.join(settings.UPLOAD_DIR, "lms")
+if not os.path.exists(lms_upload_dir):
+    os.makedirs(lms_upload_dir)
+
 app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
 
 # Include Routers
@@ -52,6 +63,24 @@ app.include_router(
     students_router, prefix=f"{settings.API_V1_STR}/students", tags=["Students"]
 )
 app.include_router(lms_router, prefix=f"{settings.API_V1_STR}/lms", tags=["LMS"])
+app.include_router(
+    timetable_router, prefix=f"{settings.API_V1_STR}/timetable", tags=["Timetable"]
+)
+app.include_router(
+    user_profile_router, prefix=f"{settings.API_V1_STR}/user-profile", tags=["User Profile"]
+)
+
+
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    print(f"Validation Error: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
 
 
 @app.get("/")

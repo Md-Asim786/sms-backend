@@ -9,8 +9,15 @@ from app.models.lms import (
     StudentSubjectStatus,
     SubjectSourceType,
     ProgramLevel,
+    LectureType,
 )
 from app.schemas.users import EnrolledStudentResponse, EnrolledEmployeeResponse
+
+
+class APIResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[Any] = None
 
 
 class AcademicYearBase(BaseModel):
@@ -101,10 +108,49 @@ class ClassSubjectBase(BaseModel):
     subject_id: UUID
     academic_year_id: Optional[UUID] = None
     periods_per_week: int = 1
+    attachments: Optional[List[str]] = None
 
 
 class ClassSubjectCreate(ClassSubjectBase):
     pass
+
+
+class AssignmentBase(BaseModel):
+    class_subject_id: UUID
+    title: str
+    description: Optional[str] = None
+    due_date: Optional[datetime] = None
+    attachments: Optional[List[str]] = None
+    allow_reupload: bool = True
+    max_file_size_mb: int = 10
+    allowed_file_types: Optional[List[str]] = None
+
+
+class AssignmentCreate(AssignmentBase):
+    pass
+
+
+class AssignmentUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    due_date: Optional[datetime] = None
+    attachments: Optional[List[str]] = None
+    allow_reupload: Optional[bool] = None
+    max_file_size_mb: Optional[int] = None
+    allowed_file_types: Optional[List[str]] = None
+
+
+class AssignmentResponse(AssignmentBase):
+    id: UUID
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AssignmentWithSubmissions(AssignmentResponse):
+    submission_count: Optional[int] = 0
+    graded_count: Optional[int] = 0
 
 
 class ClassSubjectResponse(ClassSubjectBase):
@@ -150,8 +196,98 @@ class AttendanceCreate(AttendanceBase):
     pass
 
 
+class AttendanceUpdate(BaseModel):
+    status: Optional[AttendanceStatus] = None
+    reason: Optional[str] = None
+
+
 class AttendanceResponse(AttendanceBase):
     id: UUID
+    marked_by_id: Optional[UUID] = None
+    reason: Optional[str] = None
+    audit_logs: Optional[List[dict]] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BulkAttendanceRequest(BaseModel):
+    class_subject_id: UUID
+    date: datetime
+    records: List[AttendanceBase]
+
+
+class AttendanceStats(BaseModel):
+    total_classes: int
+    present: int
+    absent: int
+    late: int
+    excused: int
+    percentage: float
+
+
+class AssignmentSubmissionBase(BaseModel):
+    assignment_id: UUID
+    student_id: UUID
+    file_url: str
+    grade: Optional[str] = None
+    feedback: Optional[str] = None
+
+
+class AssignmentSubmissionCreate(AssignmentSubmissionBase):
+    pass
+
+
+class AssignmentSubmissionUpdate(BaseModel):
+    file_url: Optional[str] = None
+    grade: Optional[str] = None
+    feedback: Optional[str] = None
+
+
+class AssignmentSubmissionResponse(AssignmentSubmissionBase):
+    id: UUID
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class GradeSubmissionRequest(BaseModel):
+    grade: str
+    feedback: Optional[str] = None
+
+
+class LectureBase(BaseModel):
+    class_subject_id: UUID
+    title: str
+    description: Optional[str] = None
+    content_url: Optional[str] = None
+    type: LectureType = LectureType.other
+    is_published: bool = False
+    author_id: Optional[UUID] = None
+    attachments: Optional[List[str]] = None
+    scheduled_at: Optional[datetime] = None
+
+
+class LectureCreate(LectureBase):
+    pass
+
+
+class LectureUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    content_url: Optional[str] = None
+    type: Optional[LectureType] = None
+    is_published: Optional[bool] = None
+    attachments: Optional[List[str]] = None
+    scheduled_at: Optional[datetime] = None
+
+
+class LectureResponse(LectureBase):
+    id: UUID
+    view_count: int = 0
+    download_count: int = 0
 
     class Config:
         from_attributes = True

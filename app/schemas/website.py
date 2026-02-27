@@ -1,4 +1,4 @@
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from uuid import UUID
@@ -46,16 +46,16 @@ class FeePaymentResponse(FeePaymentBase):
 
 
 class JobPositionBase(BaseModel):
-    category_id: UUID
+    category_id: Optional[UUID] = None
     title: str
 
+class JobPositionCreate(JobPositionBase):
+    category_id: UUID
 
 class JobPositionResponse(JobPositionBase):
     id: UUID
     created_at: datetime
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class JobCategoryBase(BaseModel):
@@ -64,14 +64,20 @@ class JobCategoryBase(BaseModel):
     requirements: Optional[List[str]] = None
     apply_link: Optional[str] = None
 
+class JobCategoryCreate(JobCategoryBase):
+    pass
+
+class JobCategoryUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    requirements: Optional[List[str]] = None
+    apply_link: Optional[str] = None
 
 class JobCategoryResponse(JobCategoryBase):
     id: UUID
     created_at: datetime
     positions: List[JobPositionResponse] = []
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class NewsBase(BaseModel):

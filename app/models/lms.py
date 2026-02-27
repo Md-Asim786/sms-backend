@@ -5,8 +5,9 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Text,
-    Enum,
+    Enum as SQLAEnum,
     Integer,
+    JSON,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
@@ -41,6 +42,13 @@ class SubjectSourceType(str, enum.Enum):
 class ProgramLevel(str, enum.Enum):
     matric = "matric"
     intermediate = "intermediate"
+
+
+class LectureType(str, enum.Enum):
+    video = "video"
+    pdf = "pdf"
+    slides = "slides"
+    other = "other"
 
 
 class AcademicYear(Base):
@@ -144,7 +152,7 @@ class Subject(Base):
     name = Column(String, nullable=False)
     code = Column(String, unique=True, nullable=False)
     description = Column(Text)
-    type = Column(Enum(SubjectType), default=SubjectType.compulsory)
+    type = Column(SQLAEnum(SubjectType), default=SubjectType.compulsory)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -175,9 +183,15 @@ class Assignment(Base):
     title = Column(String, nullable=False)
     description = Column(Text)
     due_date = Column(DateTime(timezone=True))
+    attachments = Column(JSON)
+    allow_reupload = Column(Boolean, default=True)
+    max_file_size_mb = Column(Integer, default=10)
+    allowed_file_types = Column(JSON)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     class_subject = relationship("ClassSubject")
+    submissions = relationship("AssignmentSubmission", back_populates="assignment", cascade="all, delete-orphan")
 
 
 class Lecture(Base):
@@ -188,11 +202,38 @@ class Lecture(Base):
         UUID(as_uuid=True), ForeignKey("class_subjects.id"), nullable=False
     )
     title = Column(String, nullable=False)
-    description = Column(Text)
     content_url = Column(String)
+    type = Column(SQLAEnum(LectureType), default=LectureType.other)
+    is_published = Column(Boolean, default=False)
+    author_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    view_count = Column(Integer, default=0)
+    download_count = Column(Integer, default=0)
+    attachments = Column(JSON)  # For additional materials
     scheduled_at = Column(DateTime(timezone=True))
 
     class_subject = relationship("ClassSubject")
+    author = relationship("app.models.auth.User")
+
+
+class AssignmentSubmission(Base):
+    __tablename__ = "assignment_submissions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    assignment_id = Column(
+        UUID(as_uuid=True), ForeignKey("assignments.id"), nullable=False
+    )
+    student_id = Column(
+        UUID(as_uuid=True), ForeignKey("enrolled_students.id"), nullable=False
+    )
+    file_url = Column(String, nullable=False)
+    grade = Column(String)
+    feedback = Column(Text)
+    is_graded = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    assignment = relationship("Assignment", back_populates="submissions")
+    student = relationship("app.models.users.EnrolledStudent")
 
 
 class AttendanceRecord(Base):
@@ -206,10 +247,14 @@ class AttendanceRecord(Base):
         UUID(as_uuid=True), ForeignKey("class_subjects.id"), nullable=False
     )
     date = Column(DateTime(timezone=True), nullable=False)
-    status = Column(Enum(AttendanceStatus), nullable=False)
+    status = Column(SQLAEnum(AttendanceStatus), nullable=False)
+    marked_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    reason = Column(Text)
+    audit_logs = Column(JSON)
 
     student = relationship("app.models.users.EnrolledStudent")
     class_subject = relationship("ClassSubject")
+    marked_by = relationship("app.models.auth.User")
 
 
 class StudentSubject(Base):
@@ -227,8 +272,8 @@ class StudentSubject(Base):
     academic_year_id = Column(
         UUID(as_uuid=True), ForeignKey("academic_years.id"), nullable=True
     )
-    source_type = Column(Enum(SubjectSourceType), default=SubjectSourceType.manual)
-    status = Column(Enum(StudentSubjectStatus), default=StudentSubjectStatus.active)
+    source_type = Column(SQLAEnum(SubjectSourceType), default=SubjectSourceType.manual)
+    status = Column(SQLAEnum(StudentSubjectStatus), default=StudentSubjectStatus.active)
     enrolled_at = Column(DateTime(timezone=True), server_default=func.now())
 
     student = relationship("app.models.users.EnrolledStudent")
