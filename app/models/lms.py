@@ -187,11 +187,17 @@ class Assignment(Base):
     allow_reupload = Column(Boolean, default=True)
     max_file_size_mb = Column(Integer, default=10)
     allowed_file_types = Column(JSON)
+    is_deleted = Column(Boolean, default=False)
+    deleted_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     class_subject = relationship("ClassSubject")
-    submissions = relationship("AssignmentSubmission", back_populates="assignment", cascade="all, delete-orphan")
+    submissions = relationship(
+        "AssignmentSubmission",
+        back_populates="assignment",
+        cascade="all, delete-orphan",
+    )
 
 
 class Lecture(Base):
@@ -202,6 +208,7 @@ class Lecture(Base):
         UUID(as_uuid=True), ForeignKey("class_subjects.id"), nullable=False
     )
     title = Column(String, nullable=False)
+    description = Column(Text)
     content_url = Column(String)
     type = Column(SQLAEnum(LectureType), default=LectureType.other)
     is_published = Column(Boolean, default=False)
@@ -210,6 +217,10 @@ class Lecture(Base):
     download_count = Column(Integer, default=0)
     attachments = Column(JSON)  # For additional materials
     scheduled_at = Column(DateTime(timezone=True))
+    is_deleted = Column(Boolean, default=False)
+    deleted_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     class_subject = relationship("ClassSubject")
     author = relationship("app.models.auth.User")
@@ -251,6 +262,8 @@ class AttendanceRecord(Base):
     marked_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     reason = Column(Text)
     audit_logs = Column(JSON)
+    is_deleted = Column(Boolean, default=False)
+    deleted_at = Column(DateTime(timezone=True))
 
     student = relationship("app.models.users.EnrolledStudent")
     class_subject = relationship("ClassSubject")

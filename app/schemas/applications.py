@@ -51,6 +51,8 @@ class EmployeeApplicationBase(BaseModel):
     cnic: str
     position_applied_for: str
     subject: Optional[str] = None
+    subjects: Optional[str] = None  # Comma-separated subject IDs
+    classes: Optional[str] = None  # Comma-separated class IDs for teachers
     highest_qualification: str
     experience_years: str
     current_organization: Optional[str] = None
@@ -71,6 +73,8 @@ class EmployeeApplicationResponse(EmployeeApplicationBase):
     interview_time: Optional[str] = None
     interview_location: Optional[str] = None
     interview_notes: Optional[str] = None
+    subjects: Optional[str] = None
+    classes: Optional[str] = None
 
     class Config:
         from_attributes = True

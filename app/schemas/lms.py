@@ -20,6 +20,22 @@ class APIResponse(BaseModel):
     data: Optional[Any] = None
 
 
+class PaginatedResponse(BaseModel):
+    success: bool
+    message: str
+    data: list = []
+    pagination: dict = {}
+
+
+class PaginationParams(BaseModel):
+    page: int = 1
+    limit: int = 10
+
+    @property
+    def offset(self) -> int:
+        return (self.page - 1) * self.limit
+
+
 class AcademicYearBase(BaseModel):
     name: str
     start_year: int

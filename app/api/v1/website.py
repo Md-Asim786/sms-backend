@@ -142,7 +142,7 @@ async def apply_student(
                 status_code=409,
                 detail=f"You have already submitted an application with this B-Form/CNIC number. Your current application status is: {status_display}. Please use your Registration ID: {existing_app.regId} to check your application status.",
             )
-        
+
         # Check enrolled students
         enrolled = (
             db.query(EnrolledStudent)
@@ -201,6 +201,7 @@ async def apply_employee(
     position_applied_for: str = Form(...),
     subject: Optional[str] = Form(None),
     subjects: Optional[str] = Form(None),  # Comma-separated subject IDs
+    classes: Optional[str] = Form(None),  # Comma-separated class IDs for teachers
     highest_qualification: str = Form(...),
     experience_years: str = Form(...),
     current_organization: Optional[str] = Form(None),
@@ -224,7 +225,7 @@ async def apply_employee(
         db.query(EmployeeApplication).filter(EmployeeApplication.email == email).first()
     )
     if existing_app_email:
-         raise HTTPException(
+        raise HTTPException(
             status_code=409,
             detail=f"An application with this email address has already been submitted.",
         )
@@ -272,6 +273,7 @@ async def apply_employee(
         position_applied_for=position_applied_for,
         subject=subject,
         subjects=subjects,  # Store subject IDs
+        classes=classes,  # Store class IDs for teachers
         highest_qualification=highest_qualification,
         experience_years=experience_years,
         current_organization=current_organization,

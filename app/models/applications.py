@@ -92,6 +92,9 @@ class EmployeeApplication(Base):
     position_applied_for = Column(String, nullable=False)
     subject = Column(String)  # Legacy field - stores comma-separated subject names
     subjects = Column(String)  # New field - stores comma-separated subject IDs
+    classes = Column(
+        String
+    )  # For teachers - stores comma-separated class IDs they can teach
     highest_qualification = Column(Text, nullable=False)
     experience_years = Column(String, nullable=False)
     cv_url = Column(String, nullable=False)

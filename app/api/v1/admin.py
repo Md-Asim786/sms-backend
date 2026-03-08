@@ -10,6 +10,7 @@ from fastapi import (
 )
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Any
 import uuid
 import pandas as pd
@@ -137,6 +138,7 @@ from app.schemas.lms import (
     PromotionHistoryResponse,
     StudentExamStatus,
     PromoteStudentsRequest,
+    APIResponse,
 )
 
 router = APIRouter()
@@ -596,15 +598,39 @@ def delete_subject(subject_id: uuid.UUID, db: Session = Depends(get_db)):
     if not subject:
         raise HTTPException(status_code=404, detail="Subject not found")
 
-    # Check if subject is in use
-    class_subjects = (
-        db.query(ClassSubject).filter(ClassSubject.subject_id == subject_id).first()
-    )
-    if class_subjects:
-        raise HTTPException(
-            status_code=400, detail="Cannot delete subject that is assigned to classes"
-        )
+    from sqlalchemy import text
 
+    # Delete related records using raw SQL
+    try:
+        db.execute(
+            text("DELETE FROM group_subjects WHERE subject_id = :subject_id"),
+            {"subject_id": subject_id},
+        )
+    except:
+        pass
+    try:
+        db.execute(
+            text("DELETE FROM class_subjects WHERE subject_id = :subject_id"),
+            {"subject_id": subject_id},
+        )
+    except:
+        pass
+    try:
+        db.execute(
+            text("DELETE FROM teacher_subjects WHERE subject_id = :subject_id"),
+            {"subject_id": subject_id},
+        )
+    except:
+        pass
+    try:
+        db.execute(
+            text("DELETE FROM student_subjects WHERE subject_id = :subject_id"),
+            {"subject_id": subject_id},
+        )
+    except:
+        pass
+
+    db.flush()
     db.delete(subject)
     db.commit()
     return {"message": "Subject deleted"}
@@ -898,7 +924,62 @@ def enroll_student(
 
 @router.get("/employee-applications")
 def get_employee_applications(db: Session = Depends(get_db)):
-    return db.query(EmployeeApplication).all()
+    applications = db.query(EmployeeApplication).all()
+
+    # Resolve subject IDs to names and class IDs to names
+    result = []
+    for app in applications:
+        app_dict = {
+            "id": app.id,
+            "status": app.status,
+            "first_name": app.first_name,
+            "last_name": app.last_name,
+            "gender": app.gender,
+            "date_of_birth": app.date_of_birth,
+            "photo_url": app.photo_url,
+            "phone": app.phone,
+            "email": app.email,
+            "cnic": app.cnic,
+            "position_applied_for": app.position_applied_for,
+            "subject": app.subject,
+            "subjects": app.subjects,
+            "subjects_names": "",
+            "classes": app.classes,
+            "classes_names": "",
+            "highest_qualification": app.highest_qualification,
+            "experience_years": app.experience_years,
+            "cv_url": app.cv_url,
+            "current_organization": app.current_organization,
+            "applied_at": app.applied_at,
+            "reviewed_at": app.reviewed_at,
+            "reviewed_by_admin_id": app.reviewed_by_admin_id,
+            "interview_date": app.interview_date,
+            "interview_time": app.interview_time,
+            "interview_location": app.interview_location,
+            "interview_notes": app.interview_notes,
+        }
+
+        # Resolve subject IDs to names
+        if app.subjects:
+            subject_ids = [s.strip() for s in app.subjects.split(",") if s.strip()]
+            subjects_query = db.query(Subject).filter(Subject.id.in_(subject_ids)).all()
+            subject_names = [s.name for s in subjects_query]
+            app_dict["subjects_names"] = ", ".join(subject_names)
+
+        # Resolve class IDs to names
+        if app.classes:
+            class_ids = [c.strip() for c in app.classes.split(",") if c.strip()]
+            # Try to find by UUID first, then by name/code
+            classes_query = db.query(Class).filter(Class.id.in_(class_ids)).all()
+            if not classes_query:
+                # Try finding by name if UUID not found
+                classes_query = db.query(Class).filter(Class.name.in_(class_ids)).all()
+            class_names = [c.name for c in classes_query]
+            app_dict["classes_names"] = ", ".join(class_names)
+
+        result.append(app_dict)
+
+    return result
 
 
 @router.post("/employee-applications/{app_id}/interview")
@@ -956,6 +1037,66 @@ def delete_employee_application(app_id: uuid.UUID, db: Session = Depends(get_db)
     db.delete(application)
     db.commit()
     return {"message": "Employee application deleted successfully."}
+
+
+@router.patch("/employee-applications/{app_id}")
+def update_employee_application(
+    app_id: uuid.UUID,
+    first_name: Optional[str] = Form(None),
+    last_name: Optional[str] = Form(None),
+    gender: Optional[str] = Form(None),
+    date_of_birth: Optional[str] = Form(None),
+    phone: Optional[str] = Form(None),
+    email: Optional[str] = Form(None),
+    cnic: Optional[str] = Form(None),
+    position_applied_for: Optional[str] = Form(None),
+    subject: Optional[str] = Form(None),
+    subjects: Optional[str] = Form(None),
+    classes: Optional[str] = Form(None),
+    highest_qualification: Optional[str] = Form(None),
+    experience_years: Optional[str] = Form(None),
+    current_organization: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+):
+    application = (
+        db.query(EmployeeApplication).filter(EmployeeApplication.id == app_id).first()
+    )
+    if not application:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    # Update fields if provided
+    if first_name is not None:
+        application.first_name = first_name
+    if last_name is not None:
+        application.last_name = last_name
+    if gender is not None:
+        application.gender = gender
+    if date_of_birth is not None:
+        application.date_of_birth = date_of_birth
+    if phone is not None:
+        application.phone = phone
+    if email is not None:
+        application.email = email
+    if cnic is not None:
+        application.cnic = cnic
+    if position_applied_for is not None:
+        application.position_applied_for = position_applied_for
+    if subject is not None:
+        application.subject = subject
+    if subjects is not None:
+        application.subjects = subjects
+    if classes is not None:
+        application.classes = classes
+    if highest_qualification is not None:
+        application.highest_qualification = highest_qualification
+    if experience_years is not None:
+        application.experience_years = experience_years
+    if current_organization is not None:
+        application.current_organization = current_organization
+
+    db.commit()
+    db.refresh(application)
+    return application
 
 
 @router.post("/employee-applications/{app_id}/hire")
@@ -1424,7 +1565,7 @@ def update_enrolled_student(
 
         if student.class_id != new_class_id:
             update_dict["applying_for_class"] = target_class.name
-            
+
         if student.class_id != new_class_id and not new_section_id:
             available_section = None
             for section in target_class.sections:
@@ -1531,6 +1672,50 @@ def delete_enrolled_student(student_id: uuid.UUID, db: Session = Depends(get_db)
     student = db.query(EnrolledStudent).filter(EnrolledStudent.id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
+
+    # Delete related records using raw SQL to avoid foreign key issues
+    from sqlalchemy import text
+
+    # Try to delete from each table using raw SQL
+    try:
+        db.execute(
+            text("DELETE FROM promotion_history WHERE student_id = :student_id"),
+            {"student_id": student_id},
+        )
+    except:
+        pass
+    try:
+        db.execute(
+            text("DELETE FROM attendance_records WHERE student_id = :student_id"),
+            {"student_id": student_id},
+        )
+    except:
+        pass
+    try:
+        db.execute(
+            text("DELETE FROM assignment_submissions WHERE student_id = :student_id"),
+            {"student_id": student_id},
+        )
+    except:
+        pass
+    try:
+        db.execute(
+            text("DELETE FROM student_subjects WHERE student_id = :student_id"),
+            {"student_id": student_id},
+        )
+    except:
+        pass
+    try:
+        db.execute(
+            text(
+                "DELETE FROM student_group_enrollments WHERE student_id = :student_id"
+            ),
+            {"student_id": student_id},
+        )
+    except:
+        pass
+
+    db.flush()
 
     # Optionally delete linked user account
     if student.user_id:
@@ -1957,9 +2142,7 @@ def delete_news(news_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/job-categories", response_model=JobCategoryResponse)
-def create_job_category(
-    cat_in: JobCategoryCreate, db: Session = Depends(get_db)
-):
+def create_job_category(cat_in: JobCategoryCreate, db: Session = Depends(get_db)):
     cat = JobCategory(**cat_in.model_dump())
     db.add(cat)
     db.commit()
@@ -1976,11 +2159,11 @@ def update_job_category(
     cat = db.query(JobCategory).filter(JobCategory.id == category_id).first()
     if not cat:
         raise HTTPException(status_code=404, detail="Job category not found")
-    
+
     update_data = cat_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(cat, field, value)
-    
+
     db.commit()
     db.refresh(cat)
     return cat
@@ -1997,9 +2180,7 @@ def delete_job_category(category_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 @router.post("/job-positions", response_model=JobPositionResponse)
-def create_job_position(
-    pos_in: JobPositionCreate, db: Session = Depends(get_db)
-):
+def create_job_position(pos_in: JobPositionCreate, db: Session = Depends(get_db)):
     pos = JobPosition(**pos_in.model_dump())
     db.add(pos)
     db.commit()
@@ -2016,11 +2197,11 @@ def update_job_position(
     pos = db.query(JobPosition).filter(JobPosition.id == position_id).first()
     if not pos:
         raise HTTPException(status_code=404, detail="Job position not found")
-    
+
     update_data = pos_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(pos, field, value)
-        
+
     db.commit()
     db.refresh(pos)
     return pos
@@ -2188,6 +2369,56 @@ def set_current_academic_year(year_id: uuid.UUID, db: Session = Depends(get_db))
     return {"message": f"Academic year {year.name} set as current"}
 
 
+@router.delete("/lms/academic-years/{year_id}")
+def delete_academic_year(year_id: uuid.UUID, db: Session = Depends(get_db)):
+    year = db.query(AcademicYear).filter(AcademicYear.id == year_id).first()
+    if not year:
+        raise HTTPException(status_code=404, detail="Academic year not found")
+
+    # Check if it's the current academic year
+    if year.is_current:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete the current academic year. Set another year as current first.",
+        )
+
+    # Check if there are related records
+    from app.models.users import Class, EnrolledStudent, EnrolledEmployee
+    from app.models.lms import TimetableConfig, TimetableVersion
+
+    class_count = db.query(Class).filter(Class.academic_year_id == year_id).count()
+    student_count = (
+        db.query(EnrolledStudent)
+        .filter(EnrolledStudent.academic_year_id == year_id)
+        .count()
+    )
+    employee_count = (
+        db.query(EnrolledEmployee)
+        .filter(EnrolledEmployee.academic_year_id == year_id)
+        .count()
+    )
+    timetable_count = (
+        db.query(TimetableVersion)
+        .filter(TimetableVersion.academic_year_id == year_id)
+        .count()
+    )
+
+    if (
+        class_count > 0
+        or student_count > 0
+        or employee_count > 0
+        or timetable_count > 0
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete academic year because it has {class_count} classes, {student_count} students, {employee_count} employees, and {timetable_count} timetable versions.",
+        )
+
+    db.delete(year)
+    db.commit()
+    return {"message": "Academic year deleted successfully"}
+
+
 # --- Teacher Subject Assignment ---
 
 
@@ -2316,13 +2547,29 @@ def get_students_by_subject(subject_id: uuid.UUID, db: Session = Depends(get_db)
 # --- Academic Group Management ---
 
 
-@router.get("/lms/groups", response_model=List[AcademicGroupResponse])
+@router.get("/lms/groups")
 def get_academic_groups(db: Session = Depends(get_db)):
     groups = db.query(AcademicGroup).filter(AcademicGroup.is_active == True).all()
-    return groups
+    groups_list = []
+    for g in groups:
+        groups_list.append(
+            {
+                "id": str(g.id),
+                "name": g.name,
+                "code": g.code,
+                "description": g.description,
+                "is_active": g.is_active,
+                "created_at": g.created_at.isoformat() if g.created_at else None,
+            }
+        )
+    return {
+        "success": True,
+        "message": "Academic groups retrieved successfully",
+        "data": groups_list,
+    }
 
 
-@router.post("/lms/groups", response_model=AcademicGroupResponse)
+@router.post("/lms/groups")
 def create_academic_group(group_in: AcademicGroupCreate, db: Session = Depends(get_db)):
     group_data = group_in.model_dump()
     class_ids = group_data.pop("class_ids", None)
@@ -2333,14 +2580,26 @@ def create_academic_group(group_in: AcademicGroupCreate, db: Session = Depends(g
             if cls:
                 grade_level = cls.grade_level
                 if grade_level and grade_level < 9:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Groups can only be assigned to classes 9, 10, 11, and 12. Class '{cls.name}' has grade level {grade_level}.",
-                    )
+                    return {
+                        "success": False,
+                        "message": f"Groups can only be assigned to classes 9, 10, 11, and 12. Class '{cls.name}' has grade level {grade_level}.",
+                        "data": None,
+                    }
 
     group = AcademicGroup(**group_data)
     db.add(group)
-    db.flush()
+
+    try:
+        db.flush()
+    except IntegrityError as e:
+        db.rollback()
+        if "academic_groups_code_key" in str(e.orig):
+            return {
+                "success": False,
+                "message": f"A group with code '{group_data.get('code')}' already exists. Please use a different code.",
+                "data": None,
+            }
+        raise
 
     if class_ids:
         for class_id in class_ids:
@@ -2349,16 +2608,35 @@ def create_academic_group(group_in: AcademicGroupCreate, db: Session = Depends(g
 
     db.commit()
     db.refresh(group)
-    return group
+
+    # Convert to dict for serialization
+    group_dict = {
+        "id": str(group.id),
+        "name": group.name,
+        "code": group.code,
+        "description": group.description,
+        "is_active": group.is_active,
+        "created_at": group.created_at.isoformat() if group.created_at else None,
+    }
+
+    return {
+        "success": True,
+        "message": "Academic group created successfully",
+        "data": group_dict,
+    }
 
 
-@router.patch("/lms/groups/{group_id}", response_model=AcademicGroupResponse)
+@router.patch("/lms/groups/{group_id}")
 def update_academic_group(
     group_id: uuid.UUID, data: dict = Body(...), db: Session = Depends(get_db)
 ):
     group = db.query(AcademicGroup).filter(AcademicGroup.id == group_id).first()
     if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
+        return {
+            "success": False,
+            "message": "Group not found",
+            "data": None,
+        }
 
     class_ids = data.pop("class_ids", None)
 
@@ -2373,27 +2651,50 @@ def update_academic_group(
             if cls:
                 grade_level = cls.grade_level
                 if grade_level and grade_level < 9:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Groups can only be assigned to classes 9, 10, 11, and 12. Class '{cls.name}' has grade level {grade_level}.",
-                    )
+                    return {
+                        "success": False,
+                        "message": f"Groups can only be assigned to classes 9, 10, 11, and 12. Class '{cls.name}' has grade level {grade_level}.",
+                        "data": None,
+                    }
             association = ClassGroup(class_id=class_id, group_id=group_id)
             db.add(association)
 
     db.commit()
     db.refresh(group)
-    return group
+
+    group_dict = {
+        "id": str(group.id),
+        "name": group.name,
+        "code": group.code,
+        "description": group.description,
+        "is_active": group.is_active,
+        "created_at": group.created_at.isoformat() if group.created_at else None,
+    }
+
+    return {
+        "success": True,
+        "message": "Academic group updated successfully",
+        "data": group_dict,
+    }
 
 
 @router.delete("/lms/groups/{group_id}")
 def delete_academic_group(group_id: uuid.UUID, db: Session = Depends(get_db)):
     group = db.query(AcademicGroup).filter(AcademicGroup.id == group_id).first()
     if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
+        return {
+            "success": False,
+            "message": "Group not found",
+            "data": None,
+        }
 
     group.is_active = False
     db.commit()
-    return {"message": "Group deactivated"}
+    return {
+        "success": True,
+        "message": "Group deactivated successfully",
+        "data": None,
+    }
 
 
 # --- Group Subject Mapping ---
@@ -2916,8 +3217,10 @@ def promote_students(request: PromoteStudentsRequest, db: Session = Depends(get_
         db.commit()
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database error during promotion: {str(e)}")
-        
+        raise HTTPException(
+            status_code=500, detail=f"Database error during promotion: {str(e)}"
+        )
+
     return {"message": f"Successfully promoted {promoted_count} students"}
 
 
@@ -2944,11 +3247,11 @@ def undo_promotion(promotion_id: uuid.UUID, db: Session = Depends(get_db)):
 
     student.class_id = promotion.from_class_id
     student.section_id = promotion.from_section_id
-    
+
     # Sync display class name
     if promotion.from_class:
         student.applying_for_class = promotion.from_class.name
-    
+
     student.group_id = promotion.from_group_id
 
     group_enrollment = (
